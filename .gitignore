@@ -1,0 +1,45 @@
+# Local LibreLane / Nix run artifacts
+runs/
+librelane_run/
+result
+result-*
+.result/
+.result-*/
+
+# Vendored LibreLane (flake uses GitHub; do not commit)
+vendor/
+
+# App data / bootstrap caches
+.librelane-data/
+.librelane-nix-ready
+.librelane-bootstrap/
+.librelane-dev-source.fp
+
+# Django / frontend build
+frontend/staticfiles/
+*.sqlite3
+db.sqlite3
+
+# Python
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+.venv/
+venv/
+.env
+.env.*
+
+# Editors / OS
+.direnv/
+.DS_Store
+Thumbs.db
+Desktop.ini
+*~
+*.swp
+*.swo
+
+# Logs / pickles from local runs
+*.log
+*.pkl

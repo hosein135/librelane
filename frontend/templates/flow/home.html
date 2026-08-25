@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}LibreLane Web — Home{% endblock %}
+{% block content %}
+<section class="hero">
+  <h1>LibreLane Colab, in your browser</h1>
+  <p>
+    This web app mirrors <code>notebook.ipynb</code>: install LibreLane via Nix,
+    enable the sky130 PDK, configure the serial-parallel multiplier (<code>spm</code>),
+    and run each implementation step (synthesis through LVS).
+  </p>
+  <p class="meta">LibreLane version in environment: <strong>{{ librelane_version }}</strong></p>
+</section>
+
+<section class="panel">
+  <h2>Start a new run</h2>
+  <form method="post" action="{% url 'create_run' %}">
+    {% csrf_token %}
+    <div class="form-grid">
+      <label>Design name
+        <input name="design_name" value="spm" required>
+      </label>
+      <label>PDK variant
+        <input name="pdk" value="{{ default_pdk }}">
+      </label>
+      <label>PDK family (ciel)
+        <input name="pdk_family" value="{{ default_pdk_family }}">
+      </label>
+      <label>PDK root
+        <input name="pdk_root" value="~/.ciel">
+      </label>
+      <label>Clock period (ns)
+        <input name="clock_period" type="number" step="0.1" value="10">
+      </label>
+    </div>
+    <button type="submit" class="btn primary">Create run</button>
+  </form>
+</section>
+
+<section class="panel">
+  <h2>Flow steps (same order as the notebook)</h2>
+  <ol class="step-catalog">
+    {% for step in step_catalog %}
+    <li><strong>{{ step.title }}</strong> — <code>{{ step.step_id }}</code></li>
+    {% endfor %}
+  </ol>
+</section>
+
+{% if runs %}
+<section class="panel">
+  <h2>Recent runs</h2>
+  <ul class="run-list">
+    {% for run in runs %}
+    <li>
+      <a href="{% url 'run_detail' run_id=run.pk %}">Run #{{ run.pk }}</a>
+      — {{ run.get_status_display }} — {{ run.created_at }}
+      <form method="post" action="{% url 'delete_run' run_id=run.pk %}" class="inline-form">
+        {% csrf_token %}
+        <button
+          type="submit"
+          class="btn danger js-confirm-delete"
+          data-run-id="{{ run.pk }}"
+          {% if run.status == 'running' or run.status == 'setting_up' %}disabled{% endif %}
+        >
+          Delete run
+        </button>
+      </form>
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+{% endblock %}
