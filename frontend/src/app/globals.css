@@ -554,8 +554,8 @@ pre.verilog {
 
 .flow-workspace {
   display: grid;
-  grid-template-columns: minmax(240px, 280px) minmax(0, 1fr);
-  gap: 1rem;
+  grid-template-columns: minmax(260px, 300px) minmax(0, 1fr);
+  gap: 1.1rem;
   align-items: start;
   min-height: 28rem;
 }
@@ -564,61 +564,127 @@ pre.verilog {
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 1rem 0.85rem;
   box-shadow: var(--shadow-sm);
   position: sticky;
   top: 4.5rem;
   max-height: calc(100vh - 6rem);
-  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
-.progress-list-wrap {
-  position: relative;
-  padding: 0.15rem 0.2rem;
+.flow-progress-head {
+  padding: 1rem 1rem 0.85rem;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, #fbfdff 0%, #fff 100%);
 }
 
-.progress-track,
-.progress-track-fill {
-  position: absolute;
-  left: 1.05rem;
-  top: 1rem;
-  width: 2px;
+.flow-progress-head-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.65rem;
+}
+
+.flow-progress-head-row strong {
+  font-size: 0.92rem;
+  letter-spacing: -0.01em;
+}
+
+.flow-meter {
+  height: 8px;
   border-radius: 999px;
+  background: var(--bg-soft);
+  overflow: hidden;
+  border: 1px solid var(--border);
 }
 
-.progress-track {
-  bottom: 1rem;
-  background: var(--border);
+.flow-meter-fill {
+  height: 100%;
+  width: 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #10b981, #2563eb);
+  transition: width 0.35s ease;
 }
 
-.progress-track-fill {
-  background: linear-gradient(180deg, var(--success), var(--accent));
+.flow-meter-fill.is-running {
+  background-size: 200% 100%;
+  animation: meter-shine 1.4s linear infinite;
+  background-image: linear-gradient(
+    90deg,
+    #10b981 0%,
+    #38bdf8 45%,
+    #2563eb 100%
+  );
+}
+
+.flow-meter-fill.has-fail {
+  background: linear-gradient(90deg, #10b981, #ef4444);
+}
+
+@keyframes meter-shine {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -100% 0;
+  }
+}
+
+.flow-progress-caption {
+  margin: 0.5rem 0 0;
+  font-size: 0.78rem;
 }
 
 .progress-list {
   list-style: none;
   margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0.2rem;
+  padding: 0.65rem 0.7rem 0.85rem;
+  overflow: auto;
+  flex: 1 1 auto;
+}
+
+.progress-empty {
+  padding: 0.75rem 0.5rem;
+}
+
+.progress-item {
   position: relative;
-  z-index: 1;
+  margin: 0;
+}
+
+.progress-connector {
+  position: absolute;
+  left: 1.28rem;
+  top: 2.35rem;
+  width: 2px;
+  height: calc(100% - 1.55rem);
+  background: var(--border);
+  border-radius: 999px;
+  z-index: 0;
+}
+
+.progress-connector.filled {
+  background: linear-gradient(180deg, #10b981, #93c5fd);
 }
 
 .progress-step {
+  position: relative;
+  z-index: 1;
   width: 100%;
   display: grid;
-  grid-template-columns: 1.9rem minmax(0, 1fr);
-  gap: 0.7rem;
-  align-items: center;
+  grid-template-columns: 2rem minmax(0, 1fr);
+  gap: 0.75rem;
+  align-items: start;
   text-align: left;
-  border: 0;
+  border: 1px solid transparent;
   background: transparent;
   color: inherit;
   cursor: pointer;
-  padding: 0.45rem 0.45rem 0.45rem 0.2rem;
+  padding: 0.55rem 0.55rem 0.7rem;
   border-radius: 12px;
+  transition: background 0.15s ease, border-color 0.15s ease;
 }
 
 .progress-step:hover {
@@ -626,22 +692,24 @@ pre.verilog {
 }
 
 .progress-step.active {
-  background: var(--accent-soft);
+  background: #eff6ff;
+  border-color: #bfdbfe;
 }
 
 .progress-marker {
-  width: 1.9rem;
-  height: 1.9rem;
+  width: 2rem;
+  height: 2rem;
   border-radius: 50%;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 0.75rem;
+  font-size: 0.72rem;
   font-weight: 700;
   background: #fff;
-  border: 2px solid var(--border);
+  border: 2px solid #cbd5e1;
   color: var(--muted);
-  box-shadow: 0 0 0 4px var(--panel);
+  box-shadow: 0 0 0 3px #fff;
+  flex: 0 0 auto;
 }
 
 .progress-marker.status-done {
@@ -663,15 +731,10 @@ pre.verilog {
   color: #fff;
 }
 
-.progress-marker-icon {
-  font-size: 0.85rem;
-  line-height: 1;
-}
-
 .progress-spinner {
-  width: 0.7rem;
-  height: 0.7rem;
-  border: 2px solid rgba(255, 255, 255, 0.45);
+  width: 0.72rem;
+  height: 0.72rem;
+  border: 2px solid rgba(255, 255, 255, 0.4);
   border-top-color: #fff;
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
@@ -686,24 +749,22 @@ pre.verilog {
 .progress-step-copy {
   display: flex;
   flex-direction: column;
+  gap: 0.15rem;
   min-width: 0;
+  padding-top: 0.15rem;
 }
 
 .progress-step-title {
-  font-size: 0.88rem;
+  font-size: 0.9rem;
   font-weight: 650;
   color: var(--text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  line-height: 1.3;
 }
 
 .progress-step-status {
   font-size: 0.72rem;
   color: var(--muted);
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
 }
 
 .progress-step.status-done .progress-step-status {
@@ -723,59 +784,105 @@ pre.verilog {
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 1.35rem 1.5rem 1.6rem;
   box-shadow: var(--shadow);
+  min-height: 28rem;
+  overflow: hidden;
+}
+
+.step-panel {
+  display: flex;
+  flex-direction: column;
   min-height: 28rem;
 }
 
-.step-card {
-  padding: 0;
+.step-panel-header {
+  padding: 1.35rem 1.5rem 1.1rem;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, #f8fbff 0%, #fff 100%);
 }
 
-.step-header {
+.step-panel-kicker {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.5rem 0.85rem;
-  margin-bottom: 0.75rem;
+  gap: 0.5rem 0.75rem;
+  margin-bottom: 0.55rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
 }
 
-.step-header h2 {
-  margin: 0;
-  flex: 1 1 auto;
-  letter-spacing: -0.02em;
+.step-panel-header h2 {
+  margin: 0 0 0.35rem;
+  font-size: 1.45rem;
+  letter-spacing: -0.03em;
+  line-height: 1.25;
+}
+
+.step-id {
+  display: inline-block;
+  margin-bottom: 0.55rem;
 }
 
 .step-desc {
   color: var(--muted);
-  margin: 0 0 1rem;
+  margin: 0;
+  max-width: 46rem;
+  font-weight: 400;
 }
 
-.step-actions {
+.step-toolbar {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.5rem;
-  margin: 0 0 1rem;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 1rem 1.5rem;
+  border-bottom: 1px solid var(--border);
+  background: #fcfdff;
 }
 
 .step-downloads {
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem;
-  margin: 0 0 1rem;
 }
 
-.step-log-wrap h3,
-.step-summary-wrap h3 {
-  margin: 1rem 0 0.5rem;
-  font-size: 0.8rem;
+.step-section {
+  padding: 1.15rem 1.5rem 1.35rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.step-section:last-child {
+  border-bottom: 0;
+}
+
+.step-section h3 {
+  margin: 0 0 0.75rem;
+  font-size: 0.78rem;
   color: var(--muted);
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
 
+.step-empty {
+  padding: 1.25rem 1.15rem;
+  border: 1px dashed #cbd5e1;
+  border-radius: var(--radius-sm);
+  background: #f8fafc;
+}
+
+.step-empty p {
+  margin: 0;
+}
+
+.step-empty .meta {
+  margin-top: 0.35rem;
+}
+
 .step-output {
-  margin-top: 0.5rem;
+  margin-top: 0;
 }
 
 .output-line {
@@ -784,6 +891,10 @@ pre.verilog {
 
 .output-block {
   margin: 0.75rem 0 1rem;
+}
+
+.output-block:last-child {
+  margin-bottom: 0;
 }
 
 .output-block strong {
@@ -879,8 +990,7 @@ pre.verilog {
     max-height: none;
   }
 
-  .progress-list-wrap {
-    max-height: 16rem;
-    overflow: auto;
+  .progress-list {
+    max-height: 18rem;
   }
 }
