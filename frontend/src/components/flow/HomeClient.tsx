@@ -1,17 +1,24 @@
 "use client";
 
 import Link from "next/link";
-import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import {
+  DragEvent,
+  FormEvent,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/layout/AppShell";
 import { apiFetch, type HomePayload } from "@/lib/api";
 import {
   analyzeVerilogFiles,
-  formatModuleTree,
   readVerilogFiles,
   VERILOG_UPLOAD_LIMITS,
   type VerilogAnalysis,
 } from "@/lib/verilog";
+import { ModuleHierarchyTree } from "@/components/flow/ModuleHierarchyTree";
 
 function stepsHref(runId: number, watch = false): string {
   const q = watch ? "?watch=1" : "";
@@ -45,12 +52,20 @@ export function HomeClient({
   const busyRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const selectedFilesRef = useRef<File[]>([]);
+  const dragDepthRef = useRef(0);
 
   const [analysis, setAnalysis] = useState<VerilogAnalysis | null>(null);
   const [analyzeError, setAnalyzeError] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [topModule, setTopModule] = useState("");
-  const [fileLabel, setFileLabel] = useState("No files selected");
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const [dragActive, setDragActive] = useState(false);
+
+  function clearSelectedFiles() {
+    selectedFilesRef.current = [];
+    setSelectedFiles([]);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }
 
   const loadHome = useCallback(async () => {
     setLoading(true);
@@ -69,37 +84,32 @@ export function HomeClient({
     void loadHome();
   }, [loadHome]);
 
-  async function onFilesChosen(fileList: FileList | null) {
+  async function onFilesChosen(fileList: FileList | File[] | null) {
     setAnalyzeError(null);
     setAnalysis(null);
     setTopModule("");
+    // Copy first — clearing the input empties a live FileList from <input onChange>.
+    const list = fileList && fileList.length > 0 ? Array.from(fileList) : [];
     selectedFilesRef.current = [];
-    if (!fileList || fileList.length === 0) {
-      setFileLabel("No files selected");
-      return;
-    }
+    setSelectedFiles([]);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+    if (list.length === 0) return;
+
     setAnalyzing(true);
-    setFileLabel(
-      fileList.length === 1 ? fileList[0].name : `${fileList.length} Verilog files`,
-    );
     try {
-      const { files, errors } = await readVerilogFiles(fileList);
+      const { files, errors } = await readVerilogFiles(list);
       if (errors.length) {
         setAnalyzeError(errors.join(" "));
-        setFileLabel("No files selected");
-        if (fileInputRef.current) fileInputRef.current.value = "";
         return;
       }
       const result = analyzeVerilogFiles(files);
       setAnalysis(result);
       if (!result.ok) {
         setAnalyzeError(result.errors.join(" "));
-        selectedFilesRef.current = [];
-        setFileLabel("No files selected");
-        if (fileInputRef.current) fileInputRef.current.value = "";
         return;
       }
-      selectedFilesRef.current = Array.from(fileList);
+      selectedFilesRef.current = list;
+      setSelectedFiles(list);
       const pick = result.autoTop || result.moduleNames[0] || "";
       setTopModule(pick);
       if (result.warnings.length) {
@@ -107,12 +117,46 @@ export function HomeClient({
       }
     } catch (err) {
       setAnalyzeError(err instanceof Error ? err.message : "Could not analyze Verilog.");
-      selectedFilesRef.current = [];
-      setFileLabel("No files selected");
-      if (fileInputRef.current) fileInputRef.current.value = "";
+      clearSelectedFiles();
     } finally {
       setAnalyzing(false);
     }
+  }
+
+  function onDragEnter(ev: DragEvent<HTMLDivElement>) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    if (locked || analyzing) return;
+    dragDepthRef.current += 1;
+    setDragActive(true);
+  }
+
+  function onDragLeave(ev: DragEvent<HTMLDivElement>) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) setDragActive(false);
+  }
+
+  function onDragOver(ev: DragEvent<HTMLDivElement>) {
+    ev.preventDefault();
+    ev.stopPropagation();
+  }
+
+  function onDrop(ev: DragEvent<HTMLDivElement>) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    dragDepthRef.current = 0;
+    setDragActive(false);
+    if (locked || analyzing) return;
+    void onFilesChosen(ev.dataTransfer.files);
+  }
+
+  function onClearFiles() {
+    setAnalyzeError(null);
+    setAnalysis(null);
+    setTopModule("");
+    clearSelectedFiles();
   }
 
   async function onCreate(e: FormEvent<HTMLFormElement>) {
@@ -142,7 +186,6 @@ export function HomeClient({
     const form = e.currentTarget;
     const values = new FormData(form);
     const fd = new FormData();
-    fd.set("name", String(values.get("name") || chosenTop || "run"));
     fd.set("top_module_name", chosenTop);
     fd.set("design_name", chosenTop);
     fd.set("pdk", String(values.get("pdk") || data?.default_pdk || "sky130A"));
@@ -161,9 +204,9 @@ export function HomeClient({
       }
       const id = res.data.run?.id;
       selectedFilesRef.current = [];
+      setSelectedFiles([]);
       setAnalysis(null);
       setTopModule("");
-      setFileLabel("No files selected");
       setAnalyzeError(null);
       if (fileInputRef.current) fileInputRef.current.value = "";
       if (id) {
@@ -262,114 +305,239 @@ export function HomeClient({
         </section>
       ) : null}
 
-      <section className="panel">
-        <h2>Start a new run</h2>
-        <form onSubmit={onCreate}>
-          <div className="form-grid">
-            <label>
-              Run name
-              <input
-                name="name"
-                defaultValue=""
-                placeholder={topModule || "my_design"}
-                disabled={locked}
-              />
-            </label>
-            <label className="span-2">
-              Verilog files
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept={VERILOG_UPLOAD_LIMITS.accept}
-                multiple
-                disabled={locked || analyzing}
-                onChange={(ev) => void onFilesChosen(ev.target.files)}
-              />
-              <span className="meta">
-                {fileLabel}. Multiple <code>.v</code> / <code>.sv</code> (max{" "}
-                {VERILOG_UPLOAD_LIMITS.maxFiles} files,{" "}
-                {VERILOG_UPLOAD_LIMITS.maxFileBytes / (1024 * 1024)} MiB each). Checked in
-                the browser before upload.
+      <section className="panel new-run-panel">
+        <div className="new-run-header">
+          <div>
+            <h2>Start a new run</h2>
+            <p className="meta new-run-lede">
+              Upload Verilog, choose a top module and PDK, then create a workspace for the
+              flow.
+            </p>
+          </div>
+          {analysis?.ok ? (
+            <span className="new-run-ready-pill">Ready to create</span>
+          ) : null}
+        </div>
+
+        <form className="new-run-form" onSubmit={onCreate}>
+          <div className="new-run-step">
+            <div className="new-run-step-head">
+              <span className="new-run-step-num" aria-hidden="true">
+                1
               </span>
-            </label>
-            <label>
-              Top module
-              <select
-                name="top_module_name"
-                value={topModule}
-                disabled={locked || !analysis?.ok}
-                onChange={(ev) => setTopModule(ev.target.value)}
-                required
+              <div>
+                <h3 className="new-run-step-title">Upload Verilog</h3>
+                <p className="meta">
+                  Drop <code>.v</code> / <code>.sv</code> sources. Modules are detected in
+                  the browser before upload.
+                </p>
+              </div>
+            </div>
+
+            <div className="verilog-upload">
+              <div
+                className={[
+                  "verilog-dropzone",
+                  dragActive ? "is-dragover" : "",
+                  selectedFiles.length && analysis?.ok ? "has-files" : "",
+                  analyzing ? "is-analyzing" : "",
+                  locked ? "is-disabled" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
+                onDragEnter={onDragEnter}
+                onDragLeave={onDragLeave}
+                onDragOver={onDragOver}
+                onDrop={onDrop}
               >
-                {!analysis?.ok ? (
-                  <option value="">Upload files first…</option>
+                <input
+                  ref={fileInputRef}
+                  id="verilog-files-input"
+                  className="verilog-file-input"
+                  type="file"
+                  accept={VERILOG_UPLOAD_LIMITS.accept}
+                  multiple
+                  disabled={locked || analyzing}
+                  onChange={(ev) => void onFilesChosen(ev.target.files)}
+                />
+                {selectedFiles.length === 0 ? (
+                  <label htmlFor="verilog-files-input" className="verilog-dropzone-body">
+                    <span className="verilog-dropzone-icon" aria-hidden="true">
+                      <svg width="28" height="28" viewBox="0 0 24 24" fill="none">
+                        <path
+                          d="M12 16V4m0 0 4 4m-4-4-4 4"
+                          stroke="currentColor"
+                          strokeWidth="1.75"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                        <path
+                          d="M4 14v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"
+                          stroke="currentColor"
+                          strokeWidth="1.75"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                    </span>
+                    <span className="verilog-dropzone-title">
+                      {dragActive
+                        ? "Drop files to analyze"
+                        : analyzing
+                          ? "Analyzing Verilog…"
+                          : "Drop .v / .sv files here"}
+                    </span>
+                    <span className="verilog-dropzone-hint">
+                      or <span className="verilog-browse">browse</span> — up to{" "}
+                      {VERILOG_UPLOAD_LIMITS.maxFiles} files,{" "}
+                      {VERILOG_UPLOAD_LIMITS.maxFileBytes / (1024 * 1024)} MiB each
+                    </span>
+                  </label>
                 ) : (
-                  analysis.moduleNames.map((name) => (
-                    <option key={name} value={name}>
-                      {name}
-                      {analysis.suggestedTops.includes(name) ? " (suggested top)" : ""}
-                    </option>
-                  ))
+                  <div className="verilog-file-list-wrap">
+                    <div className="verilog-file-list-head">
+                      <span>
+                        {selectedFiles.length} file
+                        {selectedFiles.length === 1 ? "" : "s"} ready
+                      </span>
+                      <div className="verilog-file-list-actions">
+                        <button
+                          type="button"
+                          className="btn"
+                          disabled={locked || analyzing}
+                          onClick={() => {
+                            if (fileInputRef.current) {
+                              fileInputRef.current.value = "";
+                              fileInputRef.current.click();
+                            }
+                          }}
+                        >
+                          Replace
+                        </button>
+                        <button
+                          type="button"
+                          className="btn"
+                          disabled={locked || analyzing}
+                          onClick={onClearFiles}
+                        >
+                          Clear
+                        </button>
+                      </div>
+                    </div>
+                    <ul className="verilog-file-list">
+                      {selectedFiles.map((file) => (
+                        <li key={`${file.name}:${file.size}:${file.lastModified}`}>
+                          <span className="verilog-file-name" title={file.name}>
+                            {file.name}
+                          </span>
+                          <span className="verilog-file-size meta">
+                            {formatBytes(file.size)}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
                 )}
-              </select>
-              <span className="meta">
-                Auto-detected when possible; choose manually if you prefer another module.
-              </span>
-            </label>
-            <label>
-              PDK variant
-              <select
-                name="pdk"
-                defaultValue={data?.default_pdk || "sky130A"}
-                disabled={locked}
-              >
-                {(data?.pdk_variants?.length
-                  ? data.pdk_variants
-                  : ["sky130A", "gf180mcuD", "ihp-sg13g2"]
-                ).map((variant) => (
-                  <option key={variant} value={variant}>
-                    {variant}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              Clock period (ns)
-              <input
-                name="clock_period"
-                type="number"
-                step="0.1"
-                defaultValue={10}
-                disabled={locked}
-              />
-            </label>
+              </div>
+            </div>
+
+            {analyzeError ? (
+              <pre className={analysis?.ok ? "warn" : "error"}>{analyzeError}</pre>
+            ) : null}
+
+            {analysis?.ok ? (
+              <div className="module-analysis">
+                <div className="module-analysis-head">
+                  <div>
+                    <strong className="module-analysis-title">Detected hierarchy</strong>
+                    <p className="meta">
+                      Click any module to choose or change the top used for synthesis. The
+                      run is named after that module; if the name already exists, a number
+                      is appended (for example <code>design_2</code>).
+                    </p>
+                  </div>
+                  {topModule ? (
+                    <div className="module-top-banner" aria-live="polite">
+                      <span className="module-top-banner-label">Selected top</span>
+                      <code className="module-top-banner-name">{topModule}</code>
+                      <span className="meta">Click another node to change it</span>
+                    </div>
+                  ) : null}
+                </div>
+                <ModuleHierarchyTree
+                  nodes={analysis.tree}
+                  selectedTop={topModule}
+                  suggestedTops={analysis.suggestedTops}
+                  onSelect={setTopModule}
+                />
+              </div>
+            ) : null}
           </div>
 
-          {analyzing ? <p className="meta">Analyzing Verilog…</p> : null}
-          {analyzeError ? (
-            <pre className={analysis?.ok ? "warn" : "error"}>{analyzeError}</pre>
-          ) : null}
-          {analysis?.ok ? (
-            <div className="module-analysis">
-              <p className="meta">
-                Modules: <code>{analysis.moduleNames.join(", ")}</code>
-                {analysis.autoTop ? (
-                  <>
-                    {" "}
-                    — auto top: <code>{analysis.autoTop}</code>
-                  </>
-                ) : null}
-              </p>
-              <pre className="module-tree" aria-label="Module hierarchy">
-                {formatModuleTree(analysis.tree) || "(no hierarchy)"}
-              </pre>
+          <div className={`new-run-step${analysis?.ok ? "" : " is-pending"}`}>
+            <div className="new-run-step-head">
+              <span className="new-run-step-num" aria-hidden="true">
+                2
+              </span>
+              <div>
+                <h3 className="new-run-step-title">Configure run</h3>
+                <p className="meta">
+                  Set the process kit and clock period. The top module is chosen in the
+                  hierarchy above.
+                </p>
+              </div>
             </div>
-          ) : null}
+
+            <div className="new-run-fields">
+              <label>
+                PDK variant
+                <select
+                  name="pdk"
+                  defaultValue={data?.default_pdk || "sky130A"}
+                  disabled={locked}
+                >
+                  {(data?.pdk_variants?.length
+                    ? data.pdk_variants
+                    : ["sky130A", "gf180mcuD", "ihp-sg13g2"]
+                  ).map((variant) => (
+                    <option key={variant} value={variant}>
+                      {variant}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Clock period (ns)
+                <input
+                  name="clock_period"
+                  type="number"
+                  step="0.1"
+                  min="0.1"
+                  defaultValue={10}
+                  disabled={locked}
+                />
+              </label>
+            </div>
+          </div>
 
           {error ? <pre className="error">{error}</pre> : null}
-          <button type="submit" className="btn primary" disabled={!canCreate}>
-            {locked ? "Busy…" : analyzing ? "Analyzing…" : "Create run"}
-          </button>
+
+          <div className="new-run-footer">
+            <p className="meta new-run-footer-hint">
+              {locked
+                ? "Finish the current run before starting another."
+                : analyzing
+                  ? "Analyzing uploaded Verilog…"
+                  : analysis?.ok && topModule
+                    ? `Ready — top module ${topModule}. Create a run to open the flow workspace.`
+                    : analysis?.ok
+                      ? "Select a top module in the hierarchy above."
+                      : "Upload and validate Verilog to enable create."}
+            </p>
+            <button type="submit" className="btn primary new-run-submit" disabled={!canCreate}>
+              {locked ? "Busy…" : analyzing ? "Analyzing…" : "Create run"}
+            </button>
+          </div>
         </form>
       </section>
 
@@ -386,10 +554,10 @@ export function HomeClient({
               <thead>
                 <tr>
                   <th>Name</th>
-                  <th>ID</th>
                   <th>Status</th>
-                  <th>Created</th>
-                  <th></th>
+                  <th>PDK variant</th>
+                  <th>Clock period (ns)</th>
+                  <th>Action</th>
                 </tr>
               </thead>
               <tbody>
@@ -403,11 +571,11 @@ export function HomeClient({
                           {run.name || runTop}
                         </Link>
                       </td>
-                      <td>#{run.id}</td>
                       <td>
                         <span className={`status-pill status-${run.status}`}>{run.status}</span>
                       </td>
-                      <td className="meta">{run.created_at}</td>
+                      <td>{run.pdk}</td>
+                      <td>{run.clock_period}</td>
                       <td className="run-table-actions">
                         <button
                           type="button"

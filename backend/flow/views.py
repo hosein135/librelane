@@ -174,6 +174,22 @@ def _start_background(
     thread.start()
 
 
+def _allocate_unique_run_name(user: User, base: str) -> str:
+    """Use top-module name; append _2, _3, … if that name already exists for the user."""
+    base = (base or "run").strip()[:240] or "run"
+    existing = set(
+        FlowRun.objects.filter(owner_user=user).values_list("name", flat=True)
+    )
+    if base not in existing:
+        return base
+    n = 2
+    while True:
+        candidate = f"{base}_{n}"
+        if candidate not in existing:
+            return candidate[:256]
+        n += 1
+
+
 def _run_to_dict(run: FlowRun, *, include_steps: bool = False) -> dict:
     data = {
         "id": run.pk,
@@ -446,10 +462,10 @@ def create_run(request: HttpRequest) -> HttpResponse:
     except StorageLimitError as exc:
         return JsonResponse({"error": str(exc)}, status=507)
 
-    run_name = str(data.get("name") or top_module)
+    run_name = _allocate_unique_run_name(user, top_module)
     run = FlowRun.objects.create(
         owner_user=user,
-        name=run_name[:256],
+        name=run_name,
         design_name=top_module[:128],
         pdk=pdk[:64],
         pdk_family=pdk_family[:64],
