@@ -114,6 +114,15 @@ class FlowStepResult(models.Model):
     def get_status_display(self) -> str:
         return dict(self.Status.choices).get(self.status, self.status)
 
+    def save(self, *args, **kwargs):
+        # Any step can emit non-JSON floats (±inf / NaN) in metrics; strip them
+        # before Postgres jsonb rejects the whole write and leaves the step stuck.
+        if self.output:
+            from flow.services.step_output import sanitize_for_json
+
+            self.output = sanitize_for_json(self.output)
+        super().save(*args, **kwargs)
+
 
 class FlowRunFile(models.Model):
     id = models.BigAutoField(primary_key=True)

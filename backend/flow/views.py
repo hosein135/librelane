@@ -36,9 +36,8 @@ from flow.services.downloads import (
     preview_source_file,
     preview_source_info,
     step_can_download_preview_source,
-    step_can_download_svg,
     step_can_download_zip,
-    svg_download_filename,
+    svg_preview_filename,
     zip_download_filename,
 )
 from flow.services.runner import FlowRunner
@@ -211,7 +210,6 @@ def _run_to_dict(run: FlowRun, *, include_steps: bool = False) -> dict:
                 "output": s.output or {},
                 "has_output": output_has_content(s.output),
                 "can_download_zip": step_can_download_zip(run, s),
-                "can_download_svg": step_can_download_svg(run, s),
                 "can_download_preview_source": step_can_download_preview_source(run, s),
                 "preview_source_name": (
                     (preview_source_info(run, s) or {}).get("name")
@@ -633,16 +631,14 @@ def download_step_preview_svg(
         data = build_preview_svg(run, step)
     except Http404:
         raise
-    as_attachment = request.GET.get("download") == "1"
     response = FileResponse(
         io.BytesIO(data),
-        as_attachment=as_attachment,
-        filename=svg_download_filename(run, step),
+        as_attachment=False,
+        filename=svg_preview_filename(run, step),
         content_type="image/svg+xml",
     )
     response["Content-Length"] = len(data)
-    if not as_attachment:
-        response["Cache-Control"] = "private, max-age=60"
+    response["Cache-Control"] = "private, max-age=60"
     return response
 
 

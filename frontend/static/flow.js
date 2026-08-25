@@ -33,7 +33,6 @@
     if (!wrap) return;
 
     const zipUrl = `/runs/${runId}/steps/${order}/outputs.zip`;
-    const svgUrl = `/runs/${runId}/steps/${order}/preview.svg?download=1`;
     const sourceUrl = `/runs/${runId}/steps/${order}/preview-source`;
     const canZip = Boolean(
       output &&
@@ -41,15 +40,11 @@
           output.step_dir ||
           output.preview_svg)
     );
-    const canSvg = Boolean(
-      output && (output.preview_svg || output.preview_html)
-    );
     const canSource = Boolean(
       output && (output.preview_svg || output.preview_html)
     );
 
     let zipBtn = wrap.querySelector(".step-download-zip");
-    let svgBtn = wrap.querySelector(".step-download-svg");
     let sourceBtn = wrap.querySelector(".step-download-source");
 
     if (canZip && !zipBtn) {
@@ -62,18 +57,6 @@
     if (zipBtn) {
       zipBtn.href = zipUrl;
       zipBtn.classList.toggle("hidden", !canZip);
-    }
-
-    if (canSvg && !svgBtn) {
-      svgBtn = document.createElement("a");
-      svgBtn.className = "btn step-download-svg";
-      svgBtn.textContent = "Download preview (.svg)";
-      svgBtn.setAttribute("download", "");
-      wrap.appendChild(svgBtn);
-    }
-    if (svgBtn) {
-      svgBtn.href = svgUrl;
-      svgBtn.classList.toggle("hidden", !canSvg);
     }
 
     const sourceLabel = output?.preview_source?.name
@@ -91,7 +74,7 @@
       sourceBtn.classList.toggle("hidden", !canSource);
     }
 
-    wrap.classList.toggle("hidden", !canZip && !canSvg && !canSource);
+    wrap.classList.toggle("hidden", !canZip && !canSource);
   }
 
   function hasOutputContent(output) {

@@ -122,10 +122,22 @@ class FlowRunner:
         finally:
             self.run.save()
 
+    def _ensure_interactive_config(self) -> None:
+        """Re-apply LibreLane Config from DB fields (needed after process restart)."""
+        configure_interactive(
+            self.run.design_name,
+            pdk=self.run.pdk,
+            clock_period=self.run.clock_period,
+        )
+
     def run_all(self) -> None:
         try:
             if self.run.status not in (FlowRun.Status.READY, FlowRun.Status.RUNNING):
                 self.setup()
+            else:
+                # Setup already ran earlier; Config.current_interactive is process-local
+                # and is lost after a server restart — restore from FlowRun scalars.
+                self._ensure_interactive_config()
 
             self.run.status = FlowRun.Status.RUNNING
             self.run.save(update_fields=["status", "updated_at"])
@@ -149,6 +161,8 @@ class FlowRunner:
         try:
             if self.run.status == FlowRun.Status.PENDING:
                 self.setup()
+            else:
+                self._ensure_interactive_config()
 
             spec = NOTEBOOK_STEPS[order]
             step_row = self.run.steps.get(order=order)
@@ -244,7 +258,36 @@ class FlowRunner:
             raise
         finally:
             step_row.finished_at = dj_timezone.now()
+            self._persist_step_row(step_row)
+
+    def _persist_step_row(self, step_row: FlowStepResult) -> None:
+        """Save step result; never leave status stuck at running due to output encoding."""
+        try:
             step_row.save()
+            return
+        except Exception:
+            pass
+        # Last resort: persist status/log without the structured payload.
+        step_row.output = {}
+        try:
+            step_row.save(
+                update_fields=[
+                    "status",
+                    "summary",
+                    "log",
+                    "output",
+                    "started_at",
+                    "finished_at",
+                ]
+            )
+        except Exception:
+            FlowStepResult.objects.filter(pk=step_row.pk).update(
+                status=step_row.status,
+                summary=(step_row.summary or "")[:2000],
+                log=(step_row.log or "")[-50000:],
+                output={},
+                finished_at=step_row.finished_at,
+            )
 
     def _seed_step_rows(self) -> None:
         if self.run.steps.exists():

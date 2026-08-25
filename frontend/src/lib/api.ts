@@ -17,7 +17,6 @@ export type FlowStep = {
   output: Record<string, unknown>;
   has_output?: boolean;
   can_download_zip?: boolean;
-  can_download_svg?: boolean;
   can_download_preview_source?: boolean;
   preview_source_name?: string;
   description?: string;

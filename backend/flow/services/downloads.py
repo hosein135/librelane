@@ -1,4 +1,4 @@
-"""Build downloadable artifacts (ZIP, SVG preview) for flow step tabs."""
+"""Build downloadable artifacts (ZIP) and inline SVG previews for flow step tabs."""
 
 from __future__ import annotations
 
@@ -399,18 +399,6 @@ def step_can_download_zip(run: FlowRun, step: FlowStepResult) -> bool:
     return any(not _is_directory_row(r) for r in db_files_for_step(run, step))
 
 
-def step_can_download_svg(run: FlowRun, step: FlowStepResult) -> bool:
-    if preview_svg_path(run, step) is not None:
-        return True
-    if _db_preview_svg_bytes(run, step) is not None:
-        return True
-    output = step.output or {}
-    if output.get("preview_html") or output.get("preview_svg"):
-        return True
-    step_dir = discover_step_dir(run, step)
-    return step_dir is not None and _png_path_in_step_dir(step_dir) is not None
-
-
 def step_has_vector_preview(run: FlowRun, step: FlowStepResult) -> bool:
     path = preview_svg_path(run, step)
     if path is None:
@@ -427,6 +415,6 @@ def zip_download_filename(run: FlowRun, step: FlowStepResult) -> str:
     return f"run-{run.pk}-step-{step.order}-{slug}.zip"
 
 
-def svg_download_filename(run: FlowRun, step: FlowStepResult) -> str:
+def svg_preview_filename(run: FlowRun, step: FlowStepResult) -> str:
     slug = re.sub(r"[^\w.-]+", "_", step.step_id).strip("_") or f"step_{step.order}"
     return f"run-{run.pk}-step-{step.order}-{slug}-preview.svg"

@@ -504,7 +504,7 @@ pre.verilog {
 .flow-page {
   display: flex;
   flex-direction: column;
-  gap: 1rem;
+  gap: 1.15rem;
 }
 
 .flow-toolbar {
@@ -513,11 +513,10 @@ pre.verilog {
   align-items: flex-start;
   justify-content: space-between;
   gap: 1rem 1.5rem;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 1.15rem 1.35rem;
-  box-shadow: var(--shadow);
+  padding: 0.25rem 0.15rem 0.35rem;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
 }
 
 .flow-toolbar-copy {
@@ -525,8 +524,17 @@ pre.verilog {
   flex: 1 1 22rem;
 }
 
-.flow-toolbar-copy > .meta:first-child {
-  margin: 0 0 0.35rem;
+.flow-back {
+  display: inline-block;
+  margin-bottom: 0.45rem;
+  font-size: 0.88rem;
+  font-weight: 600;
+  text-decoration: none;
+  color: var(--muted);
+}
+
+.flow-back:hover {
+  color: var(--accent);
 }
 
 .flow-toolbar-title-row {
@@ -538,33 +546,43 @@ pre.verilog {
 
 .flow-toolbar h1 {
   margin: 0;
-  font-size: 1.45rem;
-  letter-spacing: -0.03em;
+  font-size: 1.7rem;
+  letter-spacing: -0.04em;
+  font-weight: 750;
+}
+
+.flow-run-alias {
+  color: var(--muted);
+  font-weight: 550;
 }
 
 .flow-toolbar-meta {
-  margin: 0.45rem 0 0;
+  margin: 0.4rem 0 0;
 }
 
 .btn-run-all {
   flex: 0 0 auto;
-  padding: 0.7rem 1.25rem;
+  padding: 0.75rem 1.35rem;
   font-size: 0.98rem;
+  align-self: center;
 }
 
 .flow-workspace {
   display: grid;
-  grid-template-columns: minmax(260px, 300px) minmax(0, 1fr);
-  gap: 1.1rem;
+  grid-template-columns: minmax(280px, 320px) minmax(0, 1fr);
+  gap: 1.15rem;
   align-items: start;
-  min-height: 28rem;
+  min-height: 32rem;
 }
 
-.flow-progress {
+/* —— Progress sidebar: ring + nav list (not a timeline) —— */
+
+.flow-nav {
   background: var(--panel);
+  color: var(--text);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow-sm);
+  border-radius: 20px;
+  box-shadow: var(--shadow);
   position: sticky;
   top: 4.5rem;
   max-height: calc(100vh - 6rem);
@@ -573,169 +591,266 @@ pre.verilog {
   overflow: hidden;
 }
 
-.flow-progress-head {
-  padding: 1rem 1rem 0.85rem;
-  border-bottom: 1px solid var(--border);
-  background: linear-gradient(180deg, #fbfdff 0%, #fff 100%);
-}
-
-.flow-progress-head-row {
+.flow-nav-head {
+  padding: 1.2rem 1.1rem 1rem;
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 0.75rem;
-  margin-bottom: 0.65rem;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.9rem;
+  background:
+    radial-gradient(circle at 50% 0%, rgba(37, 99, 235, 0.08), transparent 58%),
+    linear-gradient(180deg, #f8fafc 0%, #ffffff 100%);
+  border-bottom: 1px solid var(--border);
 }
 
-.flow-progress-head-row strong {
-  font-size: 0.92rem;
-  letter-spacing: -0.01em;
+.flow-ring {
+  position: relative;
+  width: 88px;
+  height: 88px;
 }
 
-.flow-meter {
-  height: 8px;
-  border-radius: 999px;
+.flow-ring svg {
+  transform: rotate(-90deg);
+  display: block;
+}
+
+.flow-ring-track {
+  fill: none;
+  stroke: #e2e8f0;
+  stroke-width: 7;
+}
+
+.flow-ring-value {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 7;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.4s ease;
+}
+
+.flow-ring.is-running .flow-ring-value {
+  stroke: var(--success);
+}
+
+.flow-ring.has-fail .flow-ring-value {
+  stroke: var(--error);
+}
+
+.flow-ring-label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.05rem;
+  pointer-events: none;
+}
+
+.flow-ring-label strong {
+  font-size: 1.15rem;
+  letter-spacing: -0.03em;
+  color: var(--text);
+  line-height: 1;
+}
+
+.flow-ring-label span {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.flow-nav-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.4rem;
+  width: 100%;
+}
+
+.flow-nav-stats > div {
+  text-align: center;
+  padding: 0.45rem 0.25rem;
+  border-radius: 10px;
   background: var(--bg-soft);
-  overflow: hidden;
-  border: 1px solid var(--border);
+  border: 1px solid transparent;
 }
 
-.flow-meter-fill {
-  height: 100%;
-  width: 0;
-  border-radius: inherit;
-  background: linear-gradient(90deg, #10b981, #2563eb);
-  transition: width 0.35s ease;
+.flow-nav-stats strong {
+  display: block;
+  font-size: 1rem;
+  color: var(--text);
+  line-height: 1.1;
 }
 
-.flow-meter-fill.is-running {
-  background-size: 200% 100%;
-  animation: meter-shine 1.4s linear infinite;
-  background-image: linear-gradient(
-    90deg,
-    #10b981 0%,
-    #38bdf8 45%,
-    #2563eb 100%
-  );
+.flow-nav-stats span {
+  font-size: 0.68rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
-.flow-meter-fill.has-fail {
-  background: linear-gradient(90deg, #10b981, #ef4444);
+.flow-segment-bar {
+  display: flex;
+  gap: 3px;
+  width: 100%;
+  height: 6px;
 }
 
-@keyframes meter-shine {
-  from {
-    background-position: 100% 0;
-  }
-  to {
-    background-position: -100% 0;
-  }
+.flow-segment {
+  flex: 1 1 0;
+  border-radius: 999px;
+  background: #e2e8f0;
+  transition: background 0.2s ease, transform 0.2s ease;
 }
 
-.flow-progress-caption {
-  margin: 0.5rem 0 0;
-  font-size: 0.78rem;
+.flow-segment.status-done,
+.flow-segment.status-skipped {
+  background: var(--success);
 }
 
-.progress-list {
-  list-style: none;
-  margin: 0;
-  padding: 0.65rem 0.7rem 0.85rem;
+.flow-segment.status-running,
+.flow-segment.status-setting_up {
+  background: var(--info);
+}
+
+.flow-segment.status-failed {
+  background: var(--error);
+}
+
+.flow-segment.active {
+  transform: scaleY(1.45);
+}
+
+.flow-nav-list-wrap {
+  padding: 0.85rem 0.7rem 1rem;
   overflow: auto;
   flex: 1 1 auto;
+  background: var(--panel);
+}
+
+.flow-nav-label {
+  margin: 0 0.45rem 0.45rem;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.flow-nav-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
 }
 
 .progress-empty {
   padding: 0.75rem 0.5rem;
+  color: var(--muted);
 }
 
-.progress-item {
-  position: relative;
-  margin: 0;
-}
-
-.progress-connector {
-  position: absolute;
-  left: 1.28rem;
-  top: 2.35rem;
-  width: 2px;
-  height: calc(100% - 1.55rem);
-  background: var(--border);
-  border-radius: 999px;
-  z-index: 0;
-}
-
-.progress-connector.filled {
-  background: linear-gradient(180deg, #10b981, #93c5fd);
-}
-
-.progress-step {
-  position: relative;
-  z-index: 1;
+.flow-nav-item {
   width: 100%;
   display: grid;
-  grid-template-columns: 2rem minmax(0, 1fr);
-  gap: 0.75rem;
-  align-items: start;
+  grid-template-columns: 2.1rem minmax(0, 1fr) auto;
+  gap: 0.55rem;
+  align-items: center;
   text-align: left;
   border: 1px solid transparent;
   background: transparent;
-  color: inherit;
+  color: #334155;
   cursor: pointer;
-  padding: 0.55rem 0.55rem 0.7rem;
+  padding: 0.62rem 0.55rem;
   border-radius: 12px;
-  transition: background 0.15s ease, border-color 0.15s ease;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease,
+    box-shadow 0.15s ease;
 }
 
-.progress-step:hover {
+.flow-nav-item:hover {
   background: var(--bg-soft);
 }
 
-.progress-step.active {
-  background: #eff6ff;
+.flow-nav-item.active {
+  background: var(--accent-soft);
   border-color: #bfdbfe;
+  color: var(--text);
+  box-shadow: var(--shadow-sm);
 }
 
-.progress-marker {
-  width: 2rem;
-  height: 2rem;
-  border-radius: 50%;
+.flow-nav-index {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: #94a3b8;
+}
+
+.flow-nav-item.active .flow-nav-index {
+  color: var(--accent);
+}
+
+.flow-nav-item.status-done .flow-nav-index {
+  color: var(--success);
+}
+
+.flow-nav-item.status-failed .flow-nav-index {
+  color: var(--error);
+}
+
+.flow-nav-copy {
+  min-width: 0;
+}
+
+.flow-nav-title {
+  display: block;
+  font-size: 0.88rem;
+  font-weight: 600;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.flow-nav-badge {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  font-size: 0.72rem;
+  gap: 0.3rem;
+  font-size: 0.65rem;
   font-weight: 700;
-  background: #fff;
-  border: 2px solid #cbd5e1;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.22rem 0.45rem;
+  border-radius: 999px;
+  background: var(--bg-soft);
   color: var(--muted);
-  box-shadow: 0 0 0 3px #fff;
-  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
-.progress-marker.status-done {
-  background: var(--success);
-  border-color: var(--success);
-  color: #fff;
+.flow-nav-badge.status-done,
+.flow-nav-badge.status-skipped {
+  background: var(--success-soft);
+  color: var(--success);
 }
 
-.progress-marker.status-running,
-.progress-marker.status-setting_up {
-  background: var(--info);
-  border-color: var(--info);
-  color: #fff;
+.flow-nav-badge.status-running,
+.flow-nav-badge.status-setting_up {
+  background: var(--info-soft);
+  color: var(--info);
 }
 
-.progress-marker.status-failed {
-  background: var(--error);
-  border-color: var(--error);
-  color: #fff;
+.flow-nav-badge.status-failed {
+  background: var(--error-soft);
+  color: var(--error);
 }
 
 .progress-spinner {
-  width: 0.72rem;
-  height: 0.72rem;
-  border: 2px solid rgba(255, 255, 255, 0.4);
-  border-top-color: #fff;
+  width: 0.65rem;
+  height: 0.65rem;
+  border: 2px solid rgba(2, 132, 199, 0.25);
+  border-top-color: var(--info);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
@@ -746,101 +861,100 @@ pre.verilog {
   }
 }
 
-.progress-step-copy {
-  display: flex;
-  flex-direction: column;
-  gap: 0.15rem;
-  min-width: 0;
-  padding-top: 0.15rem;
-}
-
-.progress-step-title {
-  font-size: 0.9rem;
-  font-weight: 650;
-  color: var(--text);
-  line-height: 1.3;
-}
-
-.progress-step-status {
-  font-size: 0.72rem;
-  color: var(--muted);
-  font-weight: 600;
-}
-
-.progress-step.status-done .progress-step-status {
-  color: var(--success);
-}
-
-.progress-step.status-running .progress-step-status,
-.progress-step.status-setting_up .progress-step-status {
-  color: var(--info);
-}
-
-.progress-step.status-failed .progress-step-status {
-  color: var(--error);
-}
+/* —— Step content —— */
 
 .flow-detail {
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: 20px;
   box-shadow: var(--shadow);
-  min-height: 28rem;
+  min-height: 32rem;
   overflow: hidden;
+}
+
+.step-loading {
+  padding: 1.5rem;
 }
 
 .step-panel {
   display: flex;
   flex-direction: column;
-  min-height: 28rem;
+  min-height: 32rem;
 }
 
-.step-panel-header {
-  padding: 1.35rem 1.5rem 1.1rem;
+.step-hero {
+  padding: 1.4rem 1.55rem 1.2rem;
+  background:
+    linear-gradient(135deg, rgba(37, 99, 235, 0.06), transparent 45%),
+    linear-gradient(180deg, #f8fbff 0%, #fff 100%);
   border-bottom: 1px solid var(--border);
-  background: linear-gradient(180deg, #f8fbff 0%, #fff 100%);
 }
 
-.step-panel-kicker {
+.step-hero-top {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.5rem 0.75rem;
-  margin-bottom: 0.55rem;
-  color: var(--muted);
-  font-size: 0.8rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
 }
 
-.step-panel-header h2 {
-  margin: 0 0 0.35rem;
-  font-size: 1.45rem;
-  letter-spacing: -0.03em;
-  line-height: 1.25;
+.step-hero-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.step-index-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.2rem 0.55rem;
+  border-radius: 8px;
+  background: #e2e8f0;
+  color: #334155;
+  font-size: 0.75rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.step-pager {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.step-pager .btn {
+  padding: 0.35rem 0.75rem;
+  font-size: 0.82rem;
+}
+
+.step-hero h2 {
+  margin: 0 0 0.4rem;
+  font-size: 1.65rem;
+  letter-spacing: -0.035em;
+  line-height: 1.2;
 }
 
 .step-id {
   display: inline-block;
   margin-bottom: 0.55rem;
+  background: #eff6ff;
+  color: #1d4ed8;
+  border: 1px solid #dbeafe;
 }
 
 .step-desc {
   color: var(--muted);
-  margin: 0;
+  margin: 0 0 1rem;
   max-width: 46rem;
-  font-weight: 400;
+  line-height: 1.55;
 }
 
-.step-toolbar {
+.step-hero-actions {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 0.65rem;
-  padding: 1rem 1.5rem;
-  border-bottom: 1px solid var(--border);
-  background: #fcfdff;
 }
 
 .step-downloads {
@@ -849,58 +963,229 @@ pre.verilog {
   gap: 0.5rem;
 }
 
-.step-section {
-  padding: 1.15rem 1.5rem 1.35rem;
+.step-tabs {
+  display: flex;
+  gap: 0.15rem;
+  padding: 0.55rem 1.1rem 0;
   border-bottom: 1px solid var(--border);
+  background: #fafbfc;
 }
 
-.step-section:last-child {
-  border-bottom: 0;
-}
-
-.step-section h3 {
-  margin: 0 0 0.75rem;
-  font-size: 0.78rem;
+.step-tab {
+  position: relative;
+  border: 0;
+  background: transparent;
   color: var(--muted);
+  font: inherit;
+  font-weight: 650;
+  font-size: 0.9rem;
+  padding: 0.7rem 0.95rem;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.step-tab:hover {
+  color: var(--text);
+}
+
+.step-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.step-tab-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.step-tab-panels {
+  padding: 1.25rem 1.55rem 1.55rem;
+  flex: 1 1 auto;
+}
+
+.step-tab-panel {
+  animation: fade-in 0.18s ease;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.overview-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1.1rem;
+}
+
+.overview-card {
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: #f8fafc;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-height: 4.5rem;
+}
+
+.overview-label {
+  font-size: 0.72rem;
+  font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.overview-card strong,
+.overview-card code {
+  font-size: 0.95rem;
+  color: var(--text);
+  word-break: break-word;
+}
+
+.overview-blurb {
+  margin: 0;
+  color: #475569;
+  max-width: 44rem;
+  line-height: 1.6;
 }
 
 .step-empty {
-  padding: 1.25rem 1.15rem;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.25rem;
+  padding: 2rem 1.4rem;
   border: 1px dashed #cbd5e1;
-  border-radius: var(--radius-sm);
-  background: #f8fafc;
+  border-radius: 16px;
+  background:
+    radial-gradient(circle at 10% 20%, rgba(37, 99, 235, 0.05), transparent 40%),
+    #f8fafc;
+}
+
+.step-empty-icon {
+  width: 2.4rem;
+  height: 2.4rem;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  background: #e2e8f0;
+  color: #64748b;
+  font-size: 1.1rem;
+  margin-bottom: 0.55rem;
 }
 
 .step-empty p {
   margin: 0;
+  font-weight: 650;
 }
 
 .step-empty .meta {
-  margin-top: 0.35rem;
+  font-weight: 400;
 }
 
 .step-output {
-  margin-top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
 }
 
-.output-line {
-  margin: 0.35rem 0;
+.stat-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.55rem 0.85rem;
+  border-radius: 12px;
+  background: #ecfdf5;
+  border: 1px solid #a7f3d0;
+  width: fit-content;
+}
+
+.stat-chip-label {
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #047857;
+}
+
+.output-block-title {
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  margin-bottom: 0.55rem;
 }
 
 .output-block {
-  margin: 0.75rem 0 1rem;
+  margin: 0;
 }
 
-.output-block:last-child {
-  margin-bottom: 0;
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 0.65rem;
 }
 
-.output-block strong {
-  display: block;
-  margin-bottom: 0.35rem;
-  color: var(--text);
+.metric-card {
+  padding: 0.75rem 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fff;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.metric-name {
+  font-size: 0.78rem;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.metric-value {
+  font-size: 0.88rem;
+  word-break: break-word;
+  background: transparent;
+  padding: 0;
+}
+
+.artifact-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.artifact-list li {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.7rem 0.9rem;
+  border-bottom: 1px solid var(--border);
+  background: #fff;
+}
+
+.artifact-list li:last-child {
+  border-bottom: 0;
 }
 
 .output-list,
@@ -920,12 +1205,12 @@ pre.verilog {
 }
 
 .preview-svg-wrap {
-  margin-top: 0.5rem;
+  margin-top: 0.15rem;
   overflow: auto;
   max-width: 100%;
   max-height: 70vh;
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border-radius: 14px;
   background: #fff;
 }
 
@@ -980,17 +1265,17 @@ pre.verilog {
   text-decoration: none;
 }
 
-@media (max-width: 860px) {
+@media (max-width: 900px) {
   .flow-workspace {
     grid-template-columns: 1fr;
   }
 
-  .flow-progress {
+  .flow-nav {
     position: static;
     max-height: none;
   }
 
-  .progress-list {
-    max-height: 18rem;
+  .flow-nav-list-wrap {
+    max-height: 16rem;
   }
 }

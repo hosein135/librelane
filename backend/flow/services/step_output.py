@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -23,16 +24,43 @@ ARTIFACT_SUFFIXES = {
 ARTIFACT_NAMES = {"state_out.json", "config.json", "metrics.json", "or_metrics_out.json"}
 
 
-def _json_value(value: Any) -> Any:
-    if value is None:
-        return None
-    if isinstance(value, Decimal):
-        return float(value)
-    if isinstance(value, (str, int, float, bool)):
+def sanitize_for_json(value: Any) -> Any:
+    """
+    Recursively coerce values so they can be stored in Postgres jsonb.
+
+    LibreLane metrics often include ±Infinity / NaN (e.g. unconstrained STA
+    path groups). Python's json module accepts those; Postgres does not.
+    """
+    if value is None or isinstance(value, (str, bool)):
         return value
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, Decimal):
+        try:
+            as_float = float(value)
+        except (OverflowError, ValueError):
+            return None
+        return as_float if math.isfinite(as_float) else None
     if isinstance(value, Path):
         return str(value)
+    if isinstance(value, dict):
+        return {str(k): sanitize_for_json(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [sanitize_for_json(v) for v in value]
+    # numpy scalars, etc.
+    item = getattr(value, "item", None)
+    if callable(item):
+        try:
+            return sanitize_for_json(item())
+        except Exception:
+            pass
     return str(value)
+
+
+def _json_value(value: Any) -> Any:
+    return sanitize_for_json(value)
 
 
 def _views_updated(instance) -> list[str]:
@@ -158,7 +186,7 @@ def format_step_output(instance, work_dir: Path | None = None) -> dict[str, Any]
         output["step_dir"] = str(step_dir)
         output["artifacts"] = _collect_artifacts(step_dir, work_dir)
 
-    return output
+    return sanitize_for_json(output)
 
 
 def output_has_content(output: dict[str, Any] | None) -> bool:
