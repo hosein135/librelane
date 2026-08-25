@@ -13,7 +13,167 @@ const STATUS_LABELS: Record<string, string> = {
   skipped: "Skipped",
 };
 
+/** ASIC flow phases for sidebar grouping (order matters). */
+const FLOW_CATEGORIES: {
+  id: string;
+  label: string;
+  short: string;
+  blurb: string;
+  match: (stepId: string) => boolean;
+}[] = [
+  {
+    id: "synthesis",
+    label: "Synthesis",
+    short: "RTL → gates",
+    blurb: "Logic synthesis from Verilog",
+    match: (id) => id.startsWith("Yosys."),
+  },
+  {
+    id: "floorplan",
+    label: "Floorplan",
+    short: "Die & power",
+    blurb: "Chip outline, taps, I/O, PDN",
+    match: (id) =>
+      [
+        "OpenROAD.Floorplan",
+        "OpenROAD.TapEndcapInsertion",
+        "OpenROAD.IOPlacement",
+        "OpenROAD.GeneratePDN",
+      ].includes(id),
+  },
+  {
+    id: "placement",
+    label: "Placement",
+    short: "Cell sites",
+    blurb: "Global then legalized placement",
+    match: (id) =>
+      id === "OpenROAD.GlobalPlacement" || id === "OpenROAD.DetailedPlacement",
+  },
+  {
+    id: "clock",
+    label: "Clock",
+    short: "CTS",
+    blurb: "Clock tree synthesis",
+    match: (id) => id === "OpenROAD.CTS",
+  },
+  {
+    id: "routing",
+    label: "Routing",
+    short: "Wires",
+    blurb: "Global/detailed routes & fill",
+    match: (id) =>
+      [
+        "OpenROAD.GlobalRouting",
+        "OpenROAD.DetailedRouting",
+        "OpenROAD.FillInsertion",
+      ].includes(id),
+  },
+  {
+    id: "signoff",
+    label: "Signoff",
+    short: "Verify",
+    blurb: "Parasitics, timing, GDS, DRC, LVS",
+    match: (id) =>
+      [
+        "OpenROAD.RCX",
+        "OpenROAD.STAPostPNR",
+        "KLayout.StreamOut",
+        "Magic.DRC",
+        "Magic.SpiceExtraction",
+        "Netgen.LVS",
+      ].includes(id),
+  },
+];
+
 type DetailTab = "overview" | "results" | "log";
+
+type StepCategoryMeta = {
+  id: string;
+  label: string;
+  short: string;
+  blurb: string;
+};
+
+type StepCategoryGroup = StepCategoryMeta & {
+  steps: Array<{ step: FlowStep; index: number }>;
+  phase: number;
+};
+
+function categoryForStep(stepId: string): StepCategoryMeta {
+  const found = FLOW_CATEGORIES.find((c) => c.match(stepId));
+  if (found) {
+    return {
+      id: found.id,
+      label: found.label,
+      short: found.short,
+      blurb: found.blurb,
+    };
+  }
+  const tool = stepId.includes(".") ? stepId.split(".")[0] : "Other";
+  return {
+    id: "other",
+    label: tool,
+    short: tool,
+    blurb: "Additional flow steps",
+  };
+}
+
+function groupStepsByCategory(steps: FlowStep[]): StepCategoryGroup[] {
+  const groups: StepCategoryGroup[] = [];
+  const byId = new Map<string, StepCategoryGroup>();
+
+  steps.forEach((step, index) => {
+    const cat = categoryForStep(step.step_id);
+    let group = byId.get(cat.id);
+    if (!group) {
+      group = {
+        ...cat,
+        phase: groups.length + 1,
+        steps: [],
+      };
+      byId.set(cat.id, group);
+      groups.push(group);
+    }
+    group.steps.push({ step, index });
+  });
+
+  return groups;
+}
+
+function toolFromStepId(stepId: string) {
+  const dot = stepId.indexOf(".");
+  return dot > 0 ? stepId.slice(0, dot) : stepId;
+}
+
+function actionFromStepId(stepId: string) {
+  const dot = stepId.indexOf(".");
+  return dot > 0 ? stepId.slice(dot + 1) : stepId;
+}
+
+function StatusGlyph({ status }: { status: string }) {
+  if (status === "running") {
+    return (
+      <span className="flow-nav-glyph is-running" aria-hidden>
+        <span className="progress-spinner" />
+      </span>
+    );
+  }
+  if (status === "done" || status === "skipped") {
+    return (
+      <span className="flow-nav-glyph is-done" aria-hidden>
+        ✓
+      </span>
+    );
+  }
+  if (status === "failed") {
+    return (
+      <span className="flow-nav-glyph is-failed" aria-hidden>
+        !
+      </span>
+    );
+  }
+  return <span className="flow-nav-glyph is-pending" aria-hidden />;
+}
 
 function formatBytes(bytes: unknown) {
   if (bytes == null || Number.isNaN(Number(bytes))) return "";
@@ -42,6 +202,14 @@ function hasOutputContent(output: Record<string, unknown> | undefined) {
 
 function isCompleteStatus(status: string) {
   return status === "done" || status === "skipped";
+}
+
+function groupStatusSummary(group: StepCategoryGroup) {
+  if (group.steps.some((g) => g.step.status === "running")) return "In progress";
+  if (group.steps.some((g) => g.step.status === "failed")) return "Needs attention";
+  if (group.steps.every((g) => isCompleteStatus(g.step.status))) return "Complete";
+  if (group.steps.every((g) => g.step.status === "pending")) return "Waiting";
+  return "Partial";
 }
 
 function isRunBusy(run: FlowRun | null | undefined) {
@@ -82,7 +250,7 @@ function RingProgress({
       aria-valuenow={clamped}
       aria-label="Flow completion"
     >
-      <svg viewBox="0 0 80 80" width="88" height="88" aria-hidden>
+      <svg viewBox="0 0 80 80" width="78" height="78" aria-hidden>
         <circle className="flow-ring-track" cx="40" cy="40" r={r} />
         <circle
           className="flow-ring-value"
@@ -228,6 +396,7 @@ export function RunDetailClient({
   }, [load, pollOnce, watch]);
 
   const steps = useMemo(() => run?.steps || [], [run]);
+  const stepGroups = useMemo(() => groupStepsByCategory(steps), [steps]);
   const runBusy = isRunBusy(run);
 
   useEffect(() => {
@@ -302,6 +471,9 @@ export function RunDetailClient({
   }
 
   const designLabel = run ? run.top_module_name || run.design_name : "";
+  const selectedCategory = selectedStep
+    ? categoryForStep(selectedStep.step_id)
+    : null;
   const hasDownloads =
     Boolean(selectedStep?.can_download_zip) ||
     Boolean(selectedStep?.can_download_preview_source);
@@ -359,74 +531,251 @@ export function RunDetailClient({
         <div className="flow-workspace">
           <aside className="flow-nav" aria-label="Flow steps">
             <div className="flow-nav-head">
-              <RingProgress
-                value={progressPct}
-                running={isRunning}
-                failed={failedCount > 0}
-              />
+              <div className="flow-nav-head-top">
+                <RingProgress
+                  value={progressPct}
+                  running={isRunning}
+                  failed={failedCount > 0}
+                />
+                <div className="flow-nav-head-copy">
+                  <p className="flow-nav-kicker">Pipeline progress</p>
+                  <p className="flow-nav-headline">
+                    {doneCount}
+                    <span className="flow-nav-headline-sep">/</span>
+                    {steps.length || "—"}
+                  </p>
+                  <p className="flow-nav-subhead">
+                    {isRunning
+                      ? selectedStep
+                        ? `Running · ${selectedStep.title}`
+                        : "Flow in progress"
+                      : failedCount
+                        ? `${failedCount} step${failedCount === 1 ? "" : "s"} failed`
+                        : doneCount === steps.length && steps.length
+                          ? "All steps complete"
+                          : "Ready to run"}
+                  </p>
+                  {selectedCategory ? (
+                    <p className="flow-nav-focus">
+                      <span className="flow-nav-focus-label">Category</span>
+                      <span className="flow-nav-focus-value">
+                        {selectedCategory.label}
+                      </span>
+                    </p>
+                  ) : null}
+                </div>
+              </div>
               <div className="flow-nav-stats">
-                <div>
+                <div className="is-done">
                   <strong>{doneCount}</strong>
                   <span>complete</span>
                 </div>
-                <div>
+                <div className={runningCount ? "is-running" : ""}>
                   <strong>{runningCount}</strong>
                   <span>running</span>
                 </div>
-                <div>
+                <div className={failedCount ? "is-failed" : ""}>
                   <strong>{failedCount}</strong>
                   <span>failed</span>
                 </div>
               </div>
-              <div className="flow-segment-bar" aria-hidden>
-                {steps.map((s) => (
-                  <span
-                    key={s.order}
-                    className={`flow-segment status-${s.status}${
-                      activeTab === `step-${s.order}` ? " active" : ""
-                    }`}
-                    title={s.title}
-                  />
+              <div className="flow-segment-track">
+                {stepGroups.map((group) => (
+                  <div
+                    key={group.id}
+                    className={`flow-segment-cluster cat-${group.id}`}
+                    title={group.label}
+                    role="group"
+                    aria-label={group.label}
+                  >
+                    {group.steps.map(({ step: s }) => (
+                      <button
+                        key={s.order}
+                        type="button"
+                        className={`flow-segment status-${s.status}${
+                          activeTab === `step-${s.order}` ? " active" : ""
+                        }`}
+                        title={`${s.title} · ${STATUS_LABELS[s.status] || s.status}`}
+                        aria-label={`${s.title}, ${STATUS_LABELS[s.status] || s.status}`}
+                        aria-current={activeTab === `step-${s.order}` ? "step" : undefined}
+                        onClick={() => selectStep(s.order)}
+                      />
+                    ))}
+                  </div>
                 ))}
               </div>
             </div>
 
             <div className="flow-nav-list-wrap">
-              <p className="flow-nav-label">Steps</p>
-              <ol className="flow-nav-list">
-                {!steps.length ? (
-                  <li className="meta progress-empty">Loading steps…</li>
-                ) : (
-                  steps.map((s, i) => {
-                    const active = activeTab === `step-${s.order}`;
-                    return (
-                      <li key={s.order}>
-                        <button
-                          type="button"
-                          ref={active ? activeItemRef : undefined}
-                          className={`flow-nav-item status-${s.status}${active ? " active" : ""}`}
-                          onClick={() => selectStep(s.order)}
-                          title={s.step_id}
-                          aria-current={active ? "step" : undefined}
-                        >
-                          <span className="flow-nav-index">
-                            {String(i + 1).padStart(2, "0")}
-                          </span>
-                          <span className="flow-nav-copy">
-                            <span className="flow-nav-title">{s.title}</span>
-                          </span>
-                              <span className={`flow-nav-badge status-${s.status}`}>
-                            {s.status === "running" ? (
-                              <span className="progress-spinner" aria-hidden />
-                            ) : null}
-                            {STATUS_LABELS[s.status] || s.status}
-                          </span>
-                        </button>
-                      </li>
+              <div className="flow-nav-label-row">
+                <p className="flow-nav-label">
+                  Flow phases
+                  {stepGroups.length ? (
+                    <span className="flow-nav-label-count">{stepGroups.length}</span>
+                  ) : null}
+                </p>
+                {steps.length ? (
+                  <span className="flow-nav-label-meta">{steps.length} steps</span>
+                ) : null}
+              </div>
+              {!steps.length ? (
+                <p className="meta progress-empty">Loading steps…</p>
+              ) : (
+                <div className="flow-nav-groups">
+                  {stepGroups.map((group) => {
+                    const doneInGroup = group.steps.filter((g) =>
+                      isCompleteStatus(g.step.status),
+                    ).length;
+                    const failedInGroup = group.steps.some(
+                      (g) => g.step.status === "failed",
                     );
-                  })
-                )}
-              </ol>
+                    const runningInGroup = group.steps.some(
+                      (g) => g.step.status === "running",
+                    );
+                    const groupActive = group.steps.some(
+                      (g) => activeTab === `step-${g.step.order}`,
+                    );
+                    const firstIdx = group.steps[0].index + 1;
+                    const lastIdx = group.steps[group.steps.length - 1].index + 1;
+                    const rangeLabel =
+                      firstIdx === lastIdx
+                        ? `Step ${firstIdx}`
+                        : `Steps ${firstIdx}–${lastIdx}`;
+                    const summary = groupStatusSummary(group);
+                    return (
+                      <section
+                        key={group.id}
+                        className={`flow-nav-group cat-${group.id}${
+                          groupActive ? " has-active" : ""
+                        }${runningInGroup ? " is-running" : ""}${
+                          failedInGroup ? " has-fail" : ""
+                        }${
+                          doneInGroup === group.steps.length ? " is-complete" : ""
+                        }`}
+                        aria-label={`${group.label} · ${doneInGroup} of ${group.steps.length} complete`}
+                      >
+                        <header className="flow-nav-group-head">
+                          <div className="flow-nav-group-phase">
+                            {String(group.phase).padStart(2, "0")}
+                          </div>
+                          <div className="flow-nav-group-copy">
+                            <div className="flow-nav-group-title-row">
+                              <h3 className="flow-nav-group-title">{group.label}</h3>
+                              <span className="flow-nav-group-count">
+                                {doneInGroup}/{group.steps.length}
+                              </span>
+                            </div>
+                            <p className="flow-nav-group-blurb">{group.blurb}</p>
+                            <div className="flow-nav-group-meta">
+                              <span>{rangeLabel}</span>
+                              <span className="flow-nav-group-dot" aria-hidden>
+                                ·
+                              </span>
+                              <span className="flow-nav-group-short">{group.short}</span>
+                              <span className="flow-nav-group-dot" aria-hidden>
+                                ·
+                              </span>
+                              <span
+                                className={`flow-nav-group-summary${
+                                  runningInGroup
+                                    ? " is-running"
+                                    : failedInGroup
+                                      ? " is-failed"
+                                      : doneInGroup === group.steps.length
+                                        ? " is-done"
+                                        : ""
+                                }`}
+                              >
+                                {summary}
+                              </span>
+                            </div>
+                          </div>
+                        </header>
+                        <div
+                          className="flow-nav-group-bar"
+                          aria-hidden
+                          title={`${doneInGroup} of ${group.steps.length} complete`}
+                        >
+                          {group.steps.map(({ step: s }) => (
+                            <span
+                              key={s.order}
+                              className={`flow-nav-group-seg status-${s.status}${
+                                activeTab === `step-${s.order}` ? " active" : ""
+                              }`}
+                            />
+                          ))}
+                        </div>
+                        <ol className="flow-nav-list">
+                          {group.steps.map(({ step: s, index: i }, localIdx) => {
+                            const active = activeTab === `step-${s.order}`;
+                            const elapsed =
+                              s.output?.elapsed_s != null
+                                ? `${s.output.elapsed_s}s`
+                                : null;
+                            const isLast = localIdx === group.steps.length - 1;
+                            return (
+                              <li
+                                key={s.order}
+                                className={`flow-nav-li${isLast ? " is-last" : ""}`}
+                              >
+                                <button
+                                  type="button"
+                                  ref={active ? activeItemRef : undefined}
+                                  className={`flow-nav-item status-${s.status}${
+                                    active ? " active" : ""
+                                  }`}
+                                  onClick={() => selectStep(s.order)}
+                                  title={
+                                    s.description
+                                      ? `${s.step_id} — ${s.description}`
+                                      : s.step_id
+                                  }
+                                  aria-current={active ? "step" : undefined}
+                                >
+                                  <span className="flow-nav-rail" aria-hidden>
+                                    <StatusGlyph status={s.status} />
+                                  </span>
+                                  <span className="flow-nav-copy">
+                                    <span className="flow-nav-title-row">
+                                      <span className="flow-nav-index">
+                                        {String(i + 1).padStart(2, "0")}
+                                      </span>
+                                      <span className="flow-nav-title">{s.title}</span>
+                                    </span>
+                                    <span className="flow-nav-meta">
+                                      <code className="flow-nav-id">
+                                        {toolFromStepId(s.step_id)}.
+                                        {actionFromStepId(s.step_id)}
+                                      </code>
+                                    </span>
+                                    {active && s.description ? (
+                                      <span className="flow-nav-desc">
+                                        {s.description}
+                                      </span>
+                                    ) : null}
+                                    <span className="flow-nav-foot">
+                                      <span
+                                        className={`flow-nav-badge status-${s.status}`}
+                                      >
+                                        {STATUS_LABELS[s.status] || s.status}
+                                      </span>
+                                      {elapsed ? (
+                                        <span className="flow-nav-elapsed">
+                                          {elapsed}
+                                        </span>
+                                      ) : null}
+                                    </span>
+                                  </span>
+                                </button>
+                              </li>
+                            );
+                          })}
+                        </ol>
+                      </section>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           </aside>
 
@@ -444,6 +793,16 @@ export function RunDetailClient({
                       <span className="step-index-chip">
                         {selectedIndex + 1} / {steps.length}
                       </span>
+                      {selectedCategory ? (
+                        <span
+                          className={`step-category-chip cat-${selectedCategory.id}`}
+                        >
+                          {selectedCategory.label}
+                          <span className="step-category-short">
+                            {selectedCategory.short}
+                          </span>
+                        </span>
+                      ) : null}
                       <span className={`status-pill status-${selectedStep.status}`}>
                         {STATUS_LABELS[selectedStep.status] || selectedStep.status}
                       </span>
@@ -543,6 +902,10 @@ export function RunDetailClient({
                   {detailTab === "overview" ? (
                     <section className="step-tab-panel">
                       <div className="overview-grid">
+                        <div className="overview-card">
+                          <span className="overview-label">Category</span>
+                          <strong>{selectedCategory?.label || "—"}</strong>
+                        </div>
                         <div className="overview-card">
                           <span className="overview-label">Status</span>
                           <strong>
