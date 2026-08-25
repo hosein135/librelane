@@ -579,31 +579,6 @@ export function RunDetailClient({
                   <span>failed</span>
                 </div>
               </div>
-              <div className="flow-segment-track">
-                {stepGroups.map((group) => (
-                  <div
-                    key={group.id}
-                    className={`flow-segment-cluster cat-${group.id}`}
-                    title={group.label}
-                    role="group"
-                    aria-label={group.label}
-                  >
-                    {group.steps.map(({ step: s }) => (
-                      <button
-                        key={s.order}
-                        type="button"
-                        className={`flow-segment status-${s.status}${
-                          activeTab === `step-${s.order}` ? " active" : ""
-                        }`}
-                        title={`${s.title} · ${STATUS_LABELS[s.status] || s.status}`}
-                        aria-label={`${s.title}, ${STATUS_LABELS[s.status] || s.status}`}
-                        aria-current={activeTab === `step-${s.order}` ? "step" : undefined}
-                        onClick={() => selectStep(s.order)}
-                      />
-                    ))}
-                  </div>
-                ))}
-              </div>
             </div>
 
             <div className="flow-nav-list-wrap">
