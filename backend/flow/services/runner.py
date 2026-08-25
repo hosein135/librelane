@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import io
-import shutil
 import traceback
 from contextlib import redirect_stderr, redirect_stdout
 import pickle
@@ -15,7 +14,7 @@ from flow.models import FlowRun, FlowStepResult, User
 from flow.services.setup import configure_interactive, pdk_is_ready
 from flow.services.step_output import format_step_output, format_step_summary_text
 from flow.services.storage import StorageLimitError, assert_can_continue_run
-from flow.services.verilog import require_top_module_verilog
+from flow.services.verilog import list_verilog_paths, require_top_module_in_workdir
 from flow.services.workdir import create_run_workdir, finalize_run_workspace, measure_and_save_run_sizes
 from flow.steps import NOTEBOOK_STEPS, StepSpec
 
@@ -44,14 +43,14 @@ class FlowRunner:
         if self.run.work_dir:
             existing = Path(self.run.work_dir)
             if existing.is_dir():
+                require_top_module_in_workdir(self.run.design_name, existing)
                 self.work_dir = existing
                 self._state_file = existing / "librelane_state.pkl"
                 return existing
 
         assert_can_continue_run(self.run)
         base, folder_key = create_run_workdir(self.run)
-        designs = require_top_module_verilog(self.run.design_name)
-        shutil.copy2(designs, base / designs.name)
+        require_top_module_in_workdir(self.run.design_name, base)
 
         self.run.work_dir = str(base)
         self.run.temp_folder_name = folder_key
@@ -84,8 +83,9 @@ class FlowRunner:
             self._save_setup_progress(log, f"LibreLane {self._version()}")
             self._save_setup_progress(log, "Checking storage limits…")
             assert_can_continue_run(self.run)
-            self._save_setup_progress(log, "Checking top module in Verilog…")
-            require_top_module_verilog(self.run.design_name)
+            self._save_setup_progress(log, "Checking top module in uploaded Verilog…")
+            work = self._ensure_work_dir()
+            require_top_module_in_workdir(self.run.design_name, work)
             self._save_setup_progress(log, "Checking environment…")
             check_tkinter()
             pdk_root = self.run.pdk_root or settings.PDK_ROOT
@@ -192,8 +192,14 @@ class FlowRunner:
             kwargs = dict(spec.kwargs)
 
             if spec.step_id == "Yosys.Synthesis":
-                verilog = work_dir / f"{self.run.design_name}.v"
-                kwargs["VERILOG_FILES"] = [str(verilog)]
+                verilog_files = list_verilog_paths(work_dir)
+                if not verilog_files:
+                    raise RuntimeError(
+                        "No Verilog sources in the run workdir. "
+                        "Create a new run and upload .v / .sv files."
+                    )
+                require_top_module_in_workdir(self.run.design_name, work_dir)
+                kwargs["VERILOG_FILES"] = [str(p) for p in verilog_files]
                 kwargs["state_in"] = State()
             else:
                 if self._state is None:

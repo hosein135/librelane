@@ -94,6 +94,10 @@ code {
   margin-bottom: 1rem;
 }
 
+.form-grid .span-2 {
+  grid-column: span 2;
+}
+
 label {
   display: flex;
   flex-direction: column;
@@ -223,6 +227,32 @@ pre.error {
   border-radius: 6px;
   padding: 0.75rem 1rem;
   overflow-x: auto;
+}
+
+pre.warn {
+  color: #d4a72c;
+  background: rgba(212, 167, 44, 0.12);
+  border: 1px solid #d4a72c;
+  border-radius: 6px;
+  padding: 0.75rem 1rem;
+  overflow-x: auto;
+}
+
+.module-analysis {
+  margin: 0.75rem 0 1rem;
+}
+
+pre.module-tree {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.75rem 1rem;
+  overflow-x: auto;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  max-height: 16rem;
+  overflow-y: auto;
+  white-space: pre;
 }
 
 pre.log,

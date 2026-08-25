@@ -32,11 +32,11 @@ $$;
 CREATE TABLE IF NOT EXISTS flow_runs (
     id bigserial PRIMARY KEY,
     owner_user_id bigint NOT NULL REFERENCES users (id) ON DELETE CASCADE,
-    name varchar(256) NOT NULL DEFAULT 'spm',
+    name varchar(256) NOT NULL DEFAULT '',
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     status varchar(20) NOT NULL DEFAULT 'pending',
-    design_name varchar(128) NOT NULL DEFAULT 'spm',
+    design_name varchar(128) NOT NULL DEFAULT '',
     pdk varchar(64) NOT NULL DEFAULT 'sky130A',
     pdk_family varchar(64) NOT NULL DEFAULT 'sky130',
     pdk_root varchar(512) NOT NULL DEFAULT '~/.ciel',
@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS flow_runs (
     db_bytes bigint NOT NULL DEFAULT 0
 );
 
-ALTER TABLE flow_runs ADD COLUMN IF NOT EXISTS name varchar(256) NOT NULL DEFAULT 'spm';
+ALTER TABLE flow_runs ADD COLUMN IF NOT EXISTS name varchar(256) NOT NULL DEFAULT '';
 ALTER TABLE flow_runs ADD COLUMN IF NOT EXISTS temp_folder_name varchar(512) NOT NULL DEFAULT '';
 ALTER TABLE flow_runs ADD COLUMN IF NOT EXISTS artifacts_stored boolean NOT NULL DEFAULT false;
 ALTER TABLE flow_runs ADD COLUMN IF NOT EXISTS disk_bytes bigint NOT NULL DEFAULT 0;

@@ -59,11 +59,11 @@ CREATE UNIQUE INDEX users_email_lower_unique ON users (lower(email));
 CREATE TABLE flow_runs (
     id bigserial PRIMARY KEY,
     owner_user_id bigint NOT NULL REFERENCES users (id) ON DELETE CASCADE,
-    name varchar(256) NOT NULL DEFAULT 'spm',
+    name varchar(256) NOT NULL DEFAULT '',
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     status varchar(20) NOT NULL DEFAULT 'pending',
-    design_name varchar(128) NOT NULL DEFAULT 'spm',
+    design_name varchar(128) NOT NULL DEFAULT '',
     pdk varchar(64) NOT NULL DEFAULT 'sky130A',
     pdk_family varchar(64) NOT NULL DEFAULT 'sky130',
     pdk_root varchar(512) NOT NULL DEFAULT '~/.ciel',

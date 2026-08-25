@@ -34,7 +34,7 @@ On WSL with the repo on `/mnt/c`, use **`./dev_run.sh`** — it syncs to `~/.cac
 ### Web UI workflow
 
 1. **Sign up / Sign in**
-2. **Create run** — design `spm`, PDK `sky130A`, clock period `10`
+2. **Create run** — upload one or more `.v` / `.sv` files, confirm the detected top module (or pick manually), choose PDK / clock
 3. **Setup PDK** — configures the flow (PDK is downloaded automatically on first `./run.sh`)
 4. **Run full flow** — all notebook steps, or run steps individually
 
@@ -64,7 +64,6 @@ devops/flake.nix
 devops/web-shell.nix
 backend/            # Django API
 frontend/           # Next.js TypeScript UI
-designs/spm.v
 ```
 
 ## Troubleshooting

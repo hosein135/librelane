@@ -661,7 +661,7 @@ app_db_ready() {
 }
 
 schema_ready() {
-    local count
+    local count cols
     count="$(
         PGPASSWORD="${PGPASSWORD}" psql -h "${PGHOST}" -p "${PGPORT}" -U "${PGUSER}" -d "${PGDATABASE}" \
             -Atqc "SELECT COUNT(*) FROM information_schema.tables
@@ -669,7 +669,16 @@ schema_ready() {
                      AND table_name IN ('users','flow_runs','flow_step_results','flow_run_files')" \
             2>/dev/null || echo 0
     )"
-    [ "${count}" = "4" ]
+    [ "${count}" = "4" ] || return 1
+    # Also require columns added after the initial table create (ALTER IF NOT EXISTS).
+    cols="$(
+        PGPASSWORD="${PGPASSWORD}" psql -h "${PGHOST}" -p "${PGPORT}" -U "${PGUSER}" -d "${PGDATABASE}" \
+            -Atqc "SELECT COUNT(*) FROM information_schema.columns
+                   WHERE table_schema = 'public' AND table_name = 'flow_runs'
+                     AND column_name IN ('disk_bytes','db_bytes','temp_folder_name','artifacts_stored','name')" \
+            2>/dev/null || echo 0
+    )"
+    [ "${cols}" = "5" ]
 }
 
 our_postgres_running() {
@@ -761,7 +770,11 @@ ensure_schema() {
         error "Database «${PGDATABASE}» is not reachable."
         exit 1
     fi
+    # Always apply idempotent SQL (CREATE IF NOT EXISTS + ALTER ADD COLUMN IF NOT EXISTS)
+    # so new columns land on existing databases. Skip the noisy step line when already current.
     if schema_ready; then
+        PGPASSWORD="${PGPASSWORD}" psql -h "${PGHOST}" -p "${PGPORT}" -U "${PGUSER}" -d "${PGDATABASE}" \
+            -v ON_ERROR_STOP=1 -f "${SCRIPT_DIR}/database/ensure_schema.sql" >/dev/null
         info "App schema is up to date."
         return 0
     fi
@@ -769,7 +782,7 @@ ensure_schema() {
     PGPASSWORD="${PGPASSWORD}" psql -h "${PGHOST}" -p "${PGPORT}" -U "${PGUSER}" -d "${PGDATABASE}" \
         -v ON_ERROR_STOP=1 -f "${SCRIPT_DIR}/database/ensure_schema.sql" >/dev/null
     if ! schema_ready; then
-        error "Schema ensure ran but required tables are still missing."
+        error "Schema ensure ran but required tables/columns are still missing."
         exit 1
     fi
     info "App schema is ready."

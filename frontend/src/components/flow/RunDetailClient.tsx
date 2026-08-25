@@ -5,18 +5,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AppShell } from "@/components/layout/AppShell";
 import { apiFetch, type FlowRun, type FlowStep } from "@/lib/api";
 
-function formatBytes(bytes: number | undefined | null): string {
-  if (bytes == null || Number.isNaN(Number(bytes))) return "0 B";
-  let n = Number(bytes);
-  for (const unit of ["B", "KB", "MB", "GB", "TB"]) {
-    if (n < 1024 || unit === "TB") {
-      return unit === "B" ? `${Math.round(n)} ${unit}` : `${n.toFixed(1)} ${unit}`;
-    }
-    n /= 1024;
-  }
-  return `${bytes} B`;
-}
-
 const STATUS_LABELS: Record<string, string> = {
   pending: "Pending",
   running: "Running",

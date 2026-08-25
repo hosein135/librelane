@@ -26,7 +26,6 @@ def _data_dir() -> Path:
 
 
 PROJECT_ROOT = _project_root()
-DESIGNS_DIR = PROJECT_ROOT / "designs"
 DATA_DIR = _data_dir()
 RUNS_DIR = DATA_DIR
 # Per-user/per-run LibreLane workspaces live here (not OS /tmp).
@@ -99,7 +98,6 @@ USE_I18N = True
 USE_TZ = True
 
 # Notebook defaults
-LIBRELANE_DESIGN_NAME = "spm"
 LIBRELANE_PDK = os.environ.get("LIBRELANE_PDK", "sky130A")
 LIBRELANE_PDK_FAMILY = os.environ.get("LIBRELANE_PDK_FAMILY", "sky130")
 # Shared Ciel root for all supported PDK families (not user-configurable in the UI).
@@ -122,8 +120,9 @@ STORAGE_WORKDIR_RETENTION_DAYS = int(
     os.environ.get("LIBRELANE_WORKDIR_RETENTION_DAYS", "0")
 )
 
-# Flow artifacts can be large when persisted into Postgres.
+# Flow artifacts / Verilog uploads can be large.
 DATA_UPLOAD_MAX_MEMORY_SIZE = 64 * 1024 * 1024
+FILE_UPLOAD_MAX_MEMORY_SIZE = 16 * 1024 * 1024
 
 
 def ensure_data_dirs() -> None:

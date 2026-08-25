@@ -50,8 +50,13 @@ from flow.services.storage import (
     prune_expired_workdirs,
     storage_snapshot,
 )
-from flow.services.verilog import require_top_module_verilog, verilog_path_for
-from flow.services.workdir import remove_run_temp
+from flow.services.verilog import (
+    modules_in_workdir,
+    read_sources_text,
+    require_top_module_in_workdir,
+    store_uploaded_verilog,
+)
+from flow.services.workdir import create_run_workdir, measure_and_save_run_sizes, remove_run_temp
 from flow.steps import NOTEBOOK_STEPS
 
 _flow_threads: dict[int, threading.Thread] = {}
@@ -122,6 +127,9 @@ def _clear_stale_running(run: FlowRun) -> None:
 
 
 def _json_body(request: HttpRequest) -> dict:
+    content_type = (request.META.get("CONTENT_TYPE") or "").lower()
+    if "multipart/form-data" in content_type:
+        return {}
     if not request.body:
         return {}
     try:
@@ -407,14 +415,27 @@ def create_run(request: HttpRequest) -> HttpResponse:
 
     data = _parse_request_data(request)
     top_module = str(
-        data.get("top_module_name")
-        or data.get("design_name")
-        or settings.LIBRELANE_DESIGN_NAME
+        data.get("top_module_name") or data.get("design_name") or ""
     ).strip()
-    try:
-        require_top_module_verilog(top_module)
-    except ValueError as exc:
-        return JsonResponse({"error": str(exc)}, status=400)
+    if not top_module:
+        return JsonResponse(
+            {"error": "Top module name is required. Analyze uploads and select a module."},
+            status=400,
+        )
+
+    uploads: list[tuple[str, bytes]] = []
+    for uploaded in request.FILES.getlist("verilog_files"):
+        uploads.append((uploaded.name, uploaded.read()))
+    if not uploads:
+        # Also accept a single field name used by some clients.
+        single = request.FILES.get("verilog_file")
+        if single is not None:
+            uploads.append((single.name, single.read()))
+    if not uploads:
+        return JsonResponse(
+            {"error": "Upload at least one Verilog file (.v or .sv)."},
+            status=400,
+        )
 
     pdk = str(data.get("pdk") or settings.LIBRELANE_PDK).strip()
     try:
@@ -437,6 +458,27 @@ def create_run(request: HttpRequest) -> HttpResponse:
         pdk_root=settings.PDK_ROOT,
         clock_period=float(data.get("clock_period") or 10),
     )
+
+    try:
+        base, folder_key = create_run_workdir(run)
+        store_uploaded_verilog(base, uploads)
+        require_top_module_in_workdir(top_module, base)
+        run.work_dir = str(base)
+        run.temp_folder_name = folder_key
+        run.save(update_fields=["work_dir", "temp_folder_name", "updated_at"])
+        measure_and_save_run_sizes(run)
+    except ValueError as exc:
+        remove_run_temp(run)
+        run.delete()
+        return JsonResponse({"error": str(exc)}, status=400)
+    except Exception as exc:
+        remove_run_temp(run)
+        run.delete()
+        return JsonResponse(
+            {"error": f"Could not store uploaded Verilog: {exc}"},
+            status=500,
+        )
+
     if expects_html(request):
         return redirect_to_next(request, f"/?id={run.pk}")
     return JsonResponse({"status": "ok", "run": _run_to_dict(run)}, status=201)
@@ -461,19 +503,20 @@ def run_detail(request: HttpRequest, run_id: int) -> JsonResponse:
                 title=spec.title,
             )
 
-    verilog_path = verilog_path_for(run.design_name)
-    verilog_source = ""
-    if verilog_path.is_file():
-        verilog_source = verilog_path.read_text(encoding="utf-8")
+    work = Path(run.work_dir) if run.work_dir else None
+    file_names, verilog_source = read_sources_text(work)
 
     payload = _run_to_dict(run, include_steps=True)
     payload["verilog_source"] = verilog_source
+    payload["verilog_files"] = file_names
+    payload["module_names"] = modules_in_workdir(work)
     return JsonResponse(payload)
 
 
 def _reject_if_top_module_invalid(run: FlowRun) -> JsonResponse | None:
+    work = Path(run.work_dir) if run.work_dir else None
     try:
-        require_top_module_verilog(run.design_name)
+        require_top_module_in_workdir(run.design_name, work)
     except ValueError as exc:
         return JsonResponse({"error": str(exc)}, status=400)
     return None

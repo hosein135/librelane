@@ -1,6 +1,6 @@
 import { redirect } from "next/navigation";
 
-/** Legacy `/run?id=` overview URL → home overview layer. */
+/** Legacy `/run?id=` URL → run steps page. */
 export default async function LegacyRunPage({
   searchParams,
 }: {
@@ -11,8 +11,6 @@ export default async function LegacyRunPage({
   if (!Number.isFinite(id) || id <= 0) {
     redirect("/");
   }
-  if (sp.watch === "1") {
-    redirect(`/runs/${id}?watch=1`);
-  }
-  redirect(`/?id=${id}`);
+  const q = sp.watch === "1" ? "?watch=1" : "";
+  redirect(`/runs/${id}${q}`);
 }

@@ -75,10 +75,11 @@ pick_linux_cache_root() {
 }
 
 # Dirs/files kept in the work copy across runs (not wiped on stop; not overwritten by sync).
+# Paths starting with / are anchored to the repo root (so frontend/src/app/runs/ still syncs).
 RSYNC_PRESERVE_EXCLUDES=(
     --exclude '.git/'
     --exclude 'vendor/'
-    --exclude 'runs/'
+    --exclude '/runs/'
     --exclude 'librelane_run/'
     --exclude '.librelane-data/'
     --exclude 'result/'

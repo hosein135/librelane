@@ -60,6 +60,8 @@ export type FlowRun = {
   owner_username?: string | null;
   steps?: FlowStep[];
   verilog_source?: string;
+  verilog_files?: string[];
+  module_names?: string[];
 };
 
 export type HomePayload = {
@@ -77,6 +79,8 @@ export async function apiFetch<T>(
   path: string,
   init?: RequestInit,
 ): Promise<{ ok: boolean; status: number; data: T; error?: string; redirect?: string }> {
+  const isFormData =
+    typeof FormData !== "undefined" && init?.body instanceof FormData;
   const res = await fetch(path, {
     credentials: "same-origin",
     redirect: "follow",
@@ -84,7 +88,7 @@ export async function apiFetch<T>(
     headers: {
       Accept: "application/json",
       "X-Requested-With": "XMLHttpRequest",
-      ...(init?.body ? { "Content-Type": "application/json" } : {}),
+      ...(init?.body && !isFormData ? { "Content-Type": "application/json" } : {}),
       ...(init?.headers || {}),
     },
   });

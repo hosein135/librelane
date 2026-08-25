@@ -35,7 +35,7 @@ class FlowRun(models.Model):
         db_column="owner_user_id",
         related_name="runs",
     )
-    name = models.CharField(max_length=256, default="spm")
+    name = models.CharField(max_length=256, default="")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     status = models.CharField(
@@ -45,8 +45,8 @@ class FlowRun(models.Model):
     )
     design_name = models.CharField(
         max_length=128,
-        default="spm",
-        help_text="Top Verilog module name (must exist in designs/<name>.v).",
+        default="",
+        help_text="Top Verilog module name (from uploaded sources).",
     )
     pdk = models.CharField(max_length=64, default="sky130A")
     pdk_family = models.CharField(max_length=64, default="sky130")

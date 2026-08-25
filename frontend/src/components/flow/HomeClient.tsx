@@ -4,15 +4,18 @@ import Link from "next/link";
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/layout/AppShell";
-import { apiFetch, type FlowRun, type HomePayload } from "@/lib/api";
+import { apiFetch, type HomePayload } from "@/lib/api";
+import {
+  analyzeVerilogFiles,
+  formatModuleTree,
+  readVerilogFiles,
+  VERILOG_UPLOAD_LIMITS,
+  type VerilogAnalysis,
+} from "@/lib/verilog";
 
 function stepsHref(runId: number, watch = false): string {
   const q = watch ? "?watch=1" : "";
   return `/runs/${runId}${q}`;
-}
-
-function overviewHref(runId: number): string {
-  return `/?id=${runId}`;
 }
 
 function formatBytes(bytes: number | undefined | null): string {
@@ -36,12 +39,18 @@ export function HomeClient({
 }) {
   const router = useRouter();
   const [data, setData] = useState<HomePayload | null>(null);
-  const [selectedRun, setSelectedRun] = useState<FlowRun | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyLocal, setBusyLocal] = useState(false);
   const [loading, setLoading] = useState(true);
   const busyRef = useRef(false);
-  const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const selectedFilesRef = useRef<File[]>([]);
+
+  const [analysis, setAnalysis] = useState<VerilogAnalysis | null>(null);
+  const [analyzeError, setAnalyzeError] = useState<string | null>(null);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [topModule, setTopModule] = useState("");
+  const [fileLabel, setFileLabel] = useState("No files selected");
 
   const loadHome = useCallback(async () => {
     setLoading(true);
@@ -56,61 +65,55 @@ export function HomeClient({
     setLoading(false);
   }, []);
 
-  const loadSelectedRun = useCallback(async (runId: number) => {
-    const res = await apiFetch<FlowRun>(`/api/runs/${runId}`);
-    if (!res.ok) {
-      setSelectedRun(null);
-      setError(res.error || "Failed to load run.");
-      return null;
-    }
-    setSelectedRun(res.data);
-    setError(null);
-    return res.data;
-  }, []);
-
-  const pollSelected = useCallback(
-    async (runId: number) => {
-      const res = await apiFetch<FlowRun>(`/api/runs/${runId}/status`);
-      if (!res.ok) return;
-      setSelectedRun(res.data);
-      const stillBusy =
-        res.data.is_running ||
-        res.data.status === "setting_up" ||
-        res.data.status === "running";
-      if (stillBusy) {
-        const delay = res.data.status === "setting_up" ? 2000 : 4000;
-        pollTimer.current = setTimeout(() => void pollSelected(runId), delay);
-      } else {
-        busyRef.current = false;
-        pollTimer.current = null;
-        void loadHome();
-      }
-    },
-    [loadHome],
-  );
-
   useEffect(() => {
     void loadHome();
   }, [loadHome]);
 
-  useEffect(() => {
-    if (pollTimer.current) {
-      clearTimeout(pollTimer.current);
-      pollTimer.current = null;
-    }
-    if (!selectedRunId) {
-      setSelectedRun(null);
+  async function onFilesChosen(fileList: FileList | null) {
+    setAnalyzeError(null);
+    setAnalysis(null);
+    setTopModule("");
+    selectedFilesRef.current = [];
+    if (!fileList || fileList.length === 0) {
+      setFileLabel("No files selected");
       return;
     }
-    void loadSelectedRun(selectedRunId).then((run) => {
-      if (run?.is_running || run?.status === "setting_up" || run?.status === "running") {
-        void pollSelected(selectedRunId);
+    setAnalyzing(true);
+    setFileLabel(
+      fileList.length === 1 ? fileList[0].name : `${fileList.length} Verilog files`,
+    );
+    try {
+      const { files, errors } = await readVerilogFiles(fileList);
+      if (errors.length) {
+        setAnalyzeError(errors.join(" "));
+        setFileLabel("No files selected");
+        if (fileInputRef.current) fileInputRef.current.value = "";
+        return;
       }
-    });
-    return () => {
-      if (pollTimer.current) clearTimeout(pollTimer.current);
-    };
-  }, [selectedRunId, loadSelectedRun, pollSelected]);
+      const result = analyzeVerilogFiles(files);
+      setAnalysis(result);
+      if (!result.ok) {
+        setAnalyzeError(result.errors.join(" "));
+        selectedFilesRef.current = [];
+        setFileLabel("No files selected");
+        if (fileInputRef.current) fileInputRef.current.value = "";
+        return;
+      }
+      selectedFilesRef.current = Array.from(fileList);
+      const pick = result.autoTop || result.moduleNames[0] || "";
+      setTopModule(pick);
+      if (result.warnings.length) {
+        setAnalyzeError(result.warnings.join(" "));
+      }
+    } catch (err) {
+      setAnalyzeError(err instanceof Error ? err.message : "Could not analyze Verilog.");
+      selectedFilesRef.current = [];
+      setFileLabel("No files selected");
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    } finally {
+      setAnalyzing(false);
+    }
+  }
 
   async function onCreate(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -118,30 +121,53 @@ export function HomeClient({
       setError("Finish your current run before starting a new one.");
       return;
     }
+    const files = selectedFilesRef.current;
+    if (!files.length || !analysis?.ok) {
+      setError("Upload and validate Verilog files before creating a run.");
+      return;
+    }
+    const chosenTop = topModule.trim();
+    if (!chosenTop) {
+      setError("Select a top module.");
+      return;
+    }
+    if (!analysis.moduleNames.includes(chosenTop)) {
+      setError(`Top module ${chosenTop} was not found in the uploaded files.`);
+      return;
+    }
+
     busyRef.current = true;
     setBusyLocal(true);
     setError(null);
-    const form = new FormData(e.currentTarget);
-    const topModule = String(form.get("top_module_name") || "spm").trim();
-    const body = {
-      name: String(form.get("name") || topModule || "spm"),
-      top_module_name: topModule,
-      design_name: topModule,
-      pdk: String(form.get("pdk") || data?.default_pdk || "sky130A"),
-      clock_period: Number(form.get("clock_period") || 10),
-    };
+    const form = e.currentTarget;
+    const values = new FormData(form);
+    const fd = new FormData();
+    fd.set("name", String(values.get("name") || chosenTop || "run"));
+    fd.set("top_module_name", chosenTop);
+    fd.set("design_name", chosenTop);
+    fd.set("pdk", String(values.get("pdk") || data?.default_pdk || "sky130A"));
+    fd.set("clock_period", String(values.get("clock_period") || 10));
+    for (const file of files) {
+      fd.append("verilog_files", file, file.name);
+    }
     try {
       const res = await apiFetch<{ run?: { id: number }; error?: string }>("/api/runs/new", {
         method: "POST",
-        body: JSON.stringify(body),
+        body: fd,
       });
       if (!res.ok) {
         setError(res.error || `Could not create run (HTTP ${res.status}).`);
         return;
       }
       const id = res.data.run?.id;
+      selectedFilesRef.current = [];
+      setAnalysis(null);
+      setTopModule("");
+      setFileLabel("No files selected");
+      setAnalyzeError(null);
+      if (fileInputRef.current) fileInputRef.current.value = "";
       if (id) {
-        router.push(overviewHref(id));
+        router.push(stepsHref(id));
         await loadHome();
         return;
       }
@@ -173,43 +199,16 @@ export function HomeClient({
         router.push("/");
       }
       await loadHome();
-      if (selectedRunId === runId) setSelectedRun(null);
     } finally {
       busyRef.current = false;
       setBusyLocal(false);
     }
   }
 
-  async function startAction(path: string, opts?: { openSteps?: boolean }) {
-    if (!selectedRunId) return;
-    if (busyRef.current || selectedRun?.is_running) {
-      setError("A run is already in progress. Wait until it finishes.");
-      return;
-    }
-    busyRef.current = true;
-    setError(null);
-    const res = await apiFetch(path, { method: "POST" });
-    if (!res.ok) {
-      busyRef.current = false;
-      setError(res.error || "Action failed.");
-      return;
-    }
-    if (opts?.openSteps) {
-      router.push(stepsHref(selectedRunId, true));
-      return;
-    }
-    await loadSelectedRun(selectedRunId);
-    await loadHome();
-    void pollSelected(selectedRunId);
-  }
-
   const locked = Boolean(data?.busy) || busyLocal;
   const runs = data?.runs || [];
-  const isRunning = Boolean(
-    selectedRun?.is_running ||
-      selectedRun?.status === "running" ||
-      selectedRun?.status === "setting_up",
-  );
+  const canCreate =
+    Boolean(analysis?.ok) && Boolean(topModule.trim()) && !analyzing && !locked;
 
   return (
     <AppShell username={username}>
@@ -217,9 +216,8 @@ export function HomeClient({
         <h1>LibreLane Colab, in your browser</h1>
         <p>
           This web app mirrors <code>notebook.ipynb</code>: install LibreLane via Nix,
-          enable supported PDKs under <code>~/.ciel</code>, configure the serial-parallel
-          multiplier (<code>spm</code>), and run each implementation step (synthesis through
-          LVS).
+          enable supported PDKs under <code>~/.ciel</code>, upload your Verilog design,
+          pick a top module, and run each implementation step (synthesis through LVS).
         </p>
         <p className="meta">
           LibreLane version in environment:{" "}
@@ -271,20 +269,52 @@ export function HomeClient({
           <div className="form-grid">
             <label>
               Run name
-              <input name="name" defaultValue="spm" required disabled={locked} />
-            </label>
-            <label>
-              Top module name
               <input
-                name="top_module_name"
-                defaultValue="spm"
-                required
+                name="name"
+                defaultValue=""
+                placeholder={topModule || "my_design"}
                 disabled={locked}
-                pattern="[A-Za-z_][A-Za-z0-9_$]*"
-                title="Must match a module declared in designs/<name>.v"
+              />
+            </label>
+            <label className="span-2">
+              Verilog files
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept={VERILOG_UPLOAD_LIMITS.accept}
+                multiple
+                disabled={locked || analyzing}
+                onChange={(ev) => void onFilesChosen(ev.target.files)}
               />
               <span className="meta">
-                Must exist as <code>module …</code> in <code>designs/&lt;name&gt;.v</code>
+                {fileLabel}. Multiple <code>.v</code> / <code>.sv</code> (max{" "}
+                {VERILOG_UPLOAD_LIMITS.maxFiles} files,{" "}
+                {VERILOG_UPLOAD_LIMITS.maxFileBytes / (1024 * 1024)} MiB each). Checked in
+                the browser before upload.
+              </span>
+            </label>
+            <label>
+              Top module
+              <select
+                name="top_module_name"
+                value={topModule}
+                disabled={locked || !analysis?.ok}
+                onChange={(ev) => setTopModule(ev.target.value)}
+                required
+              >
+                {!analysis?.ok ? (
+                  <option value="">Upload files first…</option>
+                ) : (
+                  analysis.moduleNames.map((name) => (
+                    <option key={name} value={name}>
+                      {name}
+                      {analysis.suggestedTops.includes(name) ? " (suggested top)" : ""}
+                    </option>
+                  ))
+                )}
+              </select>
+              <span className="meta">
+                Auto-detected when possible; choose manually if you prefer another module.
               </span>
             </label>
             <label>
@@ -315,19 +345,38 @@ export function HomeClient({
               />
             </label>
           </div>
-          {error && !selectedRunId ? <pre className="error">{error}</pre> : null}
-          <button type="submit" className="btn primary" disabled={locked}>
-            {locked ? "Busy…" : "Create run"}
+
+          {analyzing ? <p className="meta">Analyzing Verilog…</p> : null}
+          {analyzeError ? (
+            <pre className={analysis?.ok ? "warn" : "error"}>{analyzeError}</pre>
+          ) : null}
+          {analysis?.ok ? (
+            <div className="module-analysis">
+              <p className="meta">
+                Modules: <code>{analysis.moduleNames.join(", ")}</code>
+                {analysis.autoTop ? (
+                  <>
+                    {" "}
+                    — auto top: <code>{analysis.autoTop}</code>
+                  </>
+                ) : null}
+              </p>
+              <pre className="module-tree" aria-label="Module hierarchy">
+                {formatModuleTree(analysis.tree) || "(no hierarchy)"}
+              </pre>
+            </div>
+          ) : null}
+
+          {error ? <pre className="error">{error}</pre> : null}
+          <button type="submit" className="btn primary" disabled={!canCreate}>
+            {locked ? "Busy…" : analyzing ? "Analyzing…" : "Create run"}
           </button>
         </form>
       </section>
 
       <section className="panel">
         <h2>Recent runs</h2>
-        <p className="meta">
-          Click a run name to open its flow steps. Use Overview for configuration, Verilog, and
-          actions on this page.
-        </p>
+        <p className="meta">Click a run name to open its flow steps.</p>
         {loading && !data ? (
           <p className="meta">Loading runs…</p>
         ) : runs.length === 0 ? (
@@ -347,12 +396,12 @@ export function HomeClient({
               <tbody>
                 {runs.map((run) => {
                   const selected = selectedRunId === run.id;
-                  const topModule = run.top_module_name || run.design_name;
+                  const runTop = run.top_module_name || run.design_name;
                   return (
                     <tr key={run.id} className={selected ? "selected" : undefined}>
                       <td>
                         <Link href={stepsHref(run.id)} className="run-name-link">
-                          {run.name || topModule}
+                          {run.name || runTop}
                         </Link>
                       </td>
                       <td>#{run.id}</td>
@@ -361,9 +410,6 @@ export function HomeClient({
                       </td>
                       <td className="meta">{run.created_at}</td>
                       <td className="run-table-actions">
-                        <Link href={overviewHref(run.id)} className="btn">
-                          Overview
-                        </Link>
                         <button
                           type="button"
                           className="btn danger"
@@ -400,132 +446,6 @@ export function HomeClient({
           ))}
         </ol>
       </section>
-
-      {selectedRunId ? (
-        <>
-          <section className="run-header panel">
-            <h2>
-              Run #{selectedRunId}
-              {selectedRun
-                ? ` — ${selectedRun.top_module_name || selectedRun.design_name}${
-                    selectedRun.name &&
-                    selectedRun.name !==
-                      (selectedRun.top_module_name || selectedRun.design_name)
-                      ? ` (${selectedRun.name})`
-                      : ""
-                  }`
-                : ""}
-            </h2>
-            <p className={`status-pill status-${selectedRun?.status || "pending"}`}>
-              {(selectedRun?.status || "pending").replaceAll("_", " ")}
-            </p>
-            {selectedRun?.error_message ? (
-              <pre className="error">{selectedRun.error_message}</pre>
-            ) : null}
-            {error ? <pre className="error">{error}</pre> : null}
-            <p className="meta">
-              {isRunning
-                ? selectedRun?.status === "setting_up"
-                  ? "Configuring flow for this run…"
-                  : "Step running…"
-                : selectedRun?.work_dir
-                  ? `Workdir: ${selectedRun.work_dir}`
-                  : selectedRun?.artifacts_stored
-                    ? "Artifacts stored in Postgres (workdir may have been pruned)."
-                    : ""}
-            </p>
-            {(selectedRun?.disk_bytes != null || selectedRun?.db_bytes != null) && (
-              <p className="meta">
-                Run size — disk: <code>{formatBytes(selectedRun.disk_bytes)}</code>, DB:{" "}
-                <code>{formatBytes(selectedRun.db_bytes)}</code>
-              </p>
-            )}
-            <div className="actions">
-              <Link href={stepsHref(selectedRunId)} className="btn primary">
-                Open flow steps
-              </Link>
-            </div>
-          </section>
-
-          <section className="panel">
-            <h2>Actions</h2>
-            <div className="actions">
-              <button
-                type="button"
-                className="btn"
-                disabled={isRunning}
-                onClick={() => void startAction(`/api/runs/${selectedRunId}/setup`)}
-              >
-                Setup PDK
-              </button>
-              <button
-                type="button"
-                className="btn primary"
-                disabled={isRunning}
-                onClick={() =>
-                  void startAction(`/api/runs/${selectedRunId}/run-all`, { openSteps: true })
-                }
-              >
-                Run full flow
-              </button>
-              <button
-                type="button"
-                className="btn danger"
-                disabled={isRunning}
-                onClick={() => void onDelete(selectedRunId)}
-              >
-                Delete run
-              </button>
-            </div>
-          </section>
-
-          <section className="panel">
-            <h2>Configuration</h2>
-            <ul className="config-list">
-              <li>
-                Top module:{" "}
-                <code>{selectedRun?.top_module_name || selectedRun?.design_name}</code>
-              </li>
-              <li>
-                PDK variant: <code>{selectedRun?.pdk}</code>
-              </li>
-              <li>
-                Clock port/net: <code>clk</code>
-              </li>
-              <li>
-                Clock period: <code>{selectedRun?.clock_period}</code> ns
-              </li>
-              <li>
-                Workdir:{" "}
-                <code>{selectedRun?.work_dir || "(created when the flow starts)"}</code>
-              </li>
-              <li>
-                Disk / DB:{" "}
-                <code>
-                  {formatBytes(selectedRun?.disk_bytes)} / {formatBytes(selectedRun?.db_bytes)}
-                </code>
-              </li>
-            </ul>
-          </section>
-
-          <section className="panel">
-            <h2>
-              Verilog —{" "}
-              <code>
-                {selectedRun?.top_module_name || selectedRun?.design_name || "…"}.v
-              </code>
-            </h2>
-            <pre className="verilog">{selectedRun?.verilog_source || ""}</pre>
-          </section>
-
-          {selectedRun?.setup_log ? (
-            <section className="panel">
-              <h2>Setup log</h2>
-              <pre className="log">{selectedRun.setup_log}</pre>
-            </section>
-          ) : null}
-        </>
-      ) : null}
     </AppShell>
   );
 }
