@@ -17,6 +17,9 @@ vendor/
 
 # Django / frontend build
 frontend/staticfiles/
+frontend/node_modules/
+frontend/.next/
+frontend/out/
 *.sqlite3
 db.sqlite3
 

@@ -11,6 +11,13 @@ from pathlib import Path
 import yaml
 from django.conf import settings
 
+from flow.pdk_catalog import (
+    format_all_pdk_families_with_sizes,
+    format_pdk_family_with_size,
+    pdk_family_size_label,
+    unique_pdk_families,
+)
+
 
 def pdk_version_hash(pdk_family: str) -> str:
     librelane_root = _find_librelane_root()
@@ -22,12 +29,14 @@ def pdk_version_hash(pdk_family: str) -> str:
         )
 
     with open(hashes_path, encoding="utf-8") as f:
-        pdk_hashes = yaml.safe_load(f)
+        pdk_hashes = yaml.safe_load(f) or {}
 
     if pdk_family not in pdk_hashes:
+        available = ", ".join(sorted(pdk_hashes)) or "(none)"
         raise KeyError(
             f"PDK '{pdk_family}' not in pdk_hashes.yaml. "
-            f"Available: {', '.join(sorted(pdk_hashes))}"
+            f"Available via Ciel/LibreLane: {available}. "
+            "Remove it from the supported PDK list or upgrade LibreLane."
         )
     return pdk_hashes[pdk_family]
 
@@ -43,6 +52,11 @@ def pdk_is_ready(pdk_root: str, pdk_family: str) -> bool:
     return version.is_installed(ciel_home) and version.is_current(ciel_home)
 
 
+def all_pdks_ready(pdk_root: str | None = None) -> bool:
+    root = pdk_root if pdk_root is not None else settings.PDK_ROOT
+    return all(pdk_is_ready(root, family) for family in unique_pdk_families())
+
+
 def ensure_pdk(
     pdk_root: str,
     pdk_family: str,
@@ -51,16 +65,28 @@ def ensure_pdk(
     verbose: bool = False,
 ) -> str:
     """
-    Enable the sky130 PDK via ciel (same as the Colab notebook).
+    Enable a PDK family via ciel (same as the Colab notebook).
     Returns captured log text (empty when verbose=True).
     """
     if pdk_is_ready(pdk_root, pdk_family):
-        message = f"PDK «{pdk_family}» already enabled under {os.path.expanduser(pdk_root)}.\n"
+        message = (
+            f"PDK «{pdk_family}» already enabled under {os.path.expanduser(pdk_root)} "
+            f"(approx. download {pdk_family_size_label(pdk_family)}).\n"
+        )
         if verbose:
             print(message, end="", flush=True)
         elif log_buffer is not None:
             log_buffer.write(message)
         return message
+
+    size = pdk_family_size_label(pdk_family)
+    start_msg = (
+        f"Downloading PDK «{pdk_family}» ({size}) into {os.path.expanduser(pdk_root)}…\n"
+    )
+    if verbose:
+        print(start_msg, end="", flush=True)
+    elif log_buffer is not None:
+        log_buffer.write(start_msg)
 
     out = io.StringIO()
     err = io.StringIO()
@@ -96,7 +122,40 @@ def ensure_pdk(
         combined = out.getvalue() + err.getvalue()
         if log_buffer is not None:
             log_buffer.write(combined)
-    return combined
+    done_msg = f"PDK «{pdk_family}» ready ({size}).\n"
+    if verbose:
+        print(done_msg, end="", flush=True)
+    elif log_buffer is not None:
+        log_buffer.write(done_msg)
+    return start_msg + combined + done_msg
+
+
+def ensure_all_pdks(
+    pdk_root: str | None = None,
+    log_buffer: io.StringIO | None = None,
+    *,
+    verbose: bool = False,
+) -> str:
+    """Download/enable every supported PDK family under the shared Ciel root."""
+    root = pdk_root if pdk_root is not None else settings.PDK_ROOT
+    summary = (
+        f"Ensuring PDKs under {os.path.expanduser(root)}: "
+        f"{format_all_pdk_families_with_sizes()}\n"
+    )
+    if verbose:
+        print(summary, end="", flush=True)
+    elif log_buffer is not None:
+        log_buffer.write(summary)
+
+    parts: list[str] = [summary]
+    for family in unique_pdk_families():
+        if verbose:
+            print(
+                f"\n=== {format_pdk_family_with_size(family)} ===\n",
+                flush=True,
+            )
+        parts.append(ensure_pdk(root, family, log_buffer=log_buffer, verbose=verbose))
+    return "".join(parts)
 
 
 def _find_librelane_root() -> Path:
@@ -122,16 +181,16 @@ def check_tkinter() -> None:
 
 
 def configure_interactive(
-    design_name: str,
+    top_module_name: str,
     *,
     pdk: str,
     clock_period: float,
 ) -> None:
-    """Mirror Config.interactive() from the notebook."""
+    """Mirror Config.interactive() from the notebook (DESIGN_NAME = top module)."""
     from librelane.config import Config
 
     Config.interactive(
-        design_name,
+        top_module_name,
         PDK=pdk,
         CLOCK_PORT="clk",
         CLOCK_NET="clk",

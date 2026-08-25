@@ -90,6 +90,10 @@ RSYNC_PRESERVE_EXCLUDES=(
     --exclude '.result/'
     --exclude '.result-*/'
     --exclude '.DS_Store'
+    --exclude 'frontend/node_modules/'
+    --exclude 'frontend/.next/'
+    --exclude 'node_modules/'
+    --exclude '.next/'
 )
 
 wipe_workdir() {

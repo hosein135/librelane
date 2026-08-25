@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
-# Development environment for the LibreLane notebook web UI.
+# Development environment for the LibreLane notebook web UI (Django API + Next.js).
 {
-  description = "LibreLane Colab notebook as a Django web application";
+  description = "LibreLane Colab notebook as a Django + Next.js web application";
 
   nixConfig = {
     extra-substituters = "https://nix-cache.fossi-foundation.org";

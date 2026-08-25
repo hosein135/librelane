@@ -6,9 +6,10 @@
 # Python, Django, LibreLane, and EDA tools come from devops/flake.nix (nixpkgs + FOSSi cache).
 #
 # Usage:
-#   ./run.sh
+#   ./run.sh                # Postgres + Django API (:8000) + Next.js UI (:3000)
 #   ./run.sh --force-setup
 #   ./run.sh --prep-only
+#   ./run.sh --build        # production Next.js build + next start
 #   ./run.sh --help
 # =============================================================================
 set -euo pipefail
@@ -56,21 +57,24 @@ SYSTEM_LOCK=""
 FORCE_SETUP=false
 PREP_ONLY=false
 DO_LAUNCH=false
+FRONTEND_BUILD=false
 CLEANING_UP=false
 INTERRUPTED=false
 FRONTEND_PID=""
 BACKEND_PID=""
 BUILD_PID=""
+WEB_PID=""
 STARTED_POSTGRES=false
 
 for arg in "$@"; do
     case "$arg" in
         --help|-h)
-            sed -n '3,30p' "$0" | sed 's/^# //'
+            sed -n '3,20p' "$0" | sed 's/^# //'
             exit 0 ;;
         --__launch)    DO_LAUNCH=true ;;
         --force-setup) FORCE_SETUP=true ;;
         --prep-only)   PREP_ONLY=true ;;
+        --build)       FRONTEND_BUILD=true ;;
         *)
             warn "Unknown argument: $arg" ;;
     esac
@@ -607,18 +611,381 @@ dir_chmod_0700_works() {
     [ "${mode}" = "700" ]
 }
 
-WEB_PID=""
+choose_librelane_data() {
+    # Prefer project-local data; on /mnt/* use ~/.local/share for Postgres sockets.
+    case "${SCRIPT_DIR}" in
+        /mnt/*)
+            LIBRELANE_DATA="${HOME}/.local/share/librelane-web"
+            ;;
+        *)
+            LIBRELANE_DATA="${SCRIPT_DIR}/.librelane-data"
+            ;;
+    esac
+}
 
 export_runtime_env() {
+    choose_librelane_data
     export LIBRELANE_WEB_ROOT="${SCRIPT_DIR}"
     export LIBRELANE_DATA_DIR="${LIBRELANE_DATA_DIR:-${LIBRELANE_DATA}}"
     mkdir -p "${LIBRELANE_DATA_DIR}"
-    export LIBRELANE_WEB_HOST="${LIBRELANE_WEB_HOST:-0.0.0.0}"
-    export LIBRELANE_WEB_PORT="${LIBRELANE_WEB_PORT:-8000}"
+    export PGHOST="${PGHOST:-127.0.0.1}"
+    export PGPORT="${PGPORT:-5432}"
+    export PGUSER="${PGUSER:-theapp}"
+    export PGPASSWORD="${PGPASSWORD:-theapp}"
+    export PGDATABASE="${PGDATABASE:-theapp}"
+    export LIBRELANE_PGDATA="${LIBRELANE_PGDATA:-${LIBRELANE_DATA_DIR}/pg}"
+    export PGDATA="${LIBRELANE_PGDATA}"
+    export BACKEND_PORT="${BACKEND_PORT:-8000}"
+    export LIBRELANE_WEB_HOST="${LIBRELANE_WEB_HOST:-127.0.0.1}"
+    export LIBRELANE_WEB_PORT="${LIBRELANE_WEB_PORT:-${BACKEND_PORT}}"
+    export BACKEND_URL="${BACKEND_URL:-http://127.0.0.1:${BACKEND_PORT}}"
+    export DJANGO_ORIGIN="${DJANGO_ORIGIN:-${BACKEND_URL}}"
+    export PORT="${PORT:-3000}"
+    export HOST="${HOST:-127.0.0.1}"
+    export NEXT_ORIGIN="${NEXT_ORIGIN:-http://127.0.0.1:${PORT}}"
+    export NEXT_TELEMETRY_DISABLED=1
     export DJANGO_SETTINGS_MODULE="${DJANGO_SETTINGS_MODULE:-librelane_web.settings}"
     export PDK_ROOT="${PDK_ROOT:-${HOME}/.ciel}"
     export LIBRELANE_PDK_FAMILY="${LIBRELANE_PDK_FAMILY:-sky130}"
     sanitize_ld_library_path
+}
+
+postgres_ready() {
+    command -v pg_isready >/dev/null 2>&1 || return 1
+    pg_isready -h "${PGHOST}" -p "${PGPORT}" >/dev/null 2>&1
+}
+
+app_db_ready() {
+    PGPASSWORD="${PGPASSWORD}" psql -h "${PGHOST}" -p "${PGPORT}" -U "${PGUSER}" -d "${PGDATABASE}" \
+        -v ON_ERROR_STOP=1 -c "SELECT 1" >/dev/null 2>&1
+}
+
+schema_ready() {
+    local count
+    count="$(
+        PGPASSWORD="${PGPASSWORD}" psql -h "${PGHOST}" -p "${PGPORT}" -U "${PGUSER}" -d "${PGDATABASE}" \
+            -Atqc "SELECT COUNT(*) FROM information_schema.tables
+                   WHERE table_schema = 'public'
+                     AND table_name IN ('users','flow_runs','flow_step_results','flow_run_files')" \
+            2>/dev/null || echo 0
+    )"
+    [ "${count}" = "4" ]
+}
+
+our_postgres_running() {
+    [ -n "${PGDATA:-}" ] && [ -f "${PGDATA}/postmaster.pid" ] \
+        && command -v pg_ctl >/dev/null 2>&1 \
+        && pg_ctl -D "${PGDATA}" status >/dev/null 2>&1
+}
+
+try_bootstrap_app_db() {
+    local super host pass err
+    err="${LIBRELANE_DATA_DIR}/bootstrap.err"
+    mkdir -p "${LIBRELANE_DATA_DIR}"
+    for host in "${PGHOST}" "${LIBRELANE_DATA_DIR}" ""; do
+        for super in "${PGUSER_SUPER:-}" postgres "$(whoami)"; do
+            [ -z "${super}" ] && continue
+            pass="${PGPASSWORD_SUPER:-}"
+            if [ -z "${host}" ]; then
+                if PGPASSWORD="${pass}" psql -p "${PGPORT}" -U "${super}" -d postgres \
+                    -v ON_ERROR_STOP=1 -f "${SCRIPT_DIR}/database/ensure_db.sql" \
+                    >"${err}" 2>&1; then
+                    return 0
+                fi
+            else
+                if PGPASSWORD="${pass}" psql -h "${host}" -p "${PGPORT}" -U "${super}" -d postgres \
+                    -v ON_ERROR_STOP=1 -f "${SCRIPT_DIR}/database/ensure_db.sql" \
+                    >"${err}" 2>&1; then
+                    return 0
+                fi
+            fi
+        done
+    done
+    return 1
+}
+
+pick_free_pg_port() {
+    local p
+    for p in "${PGPORT}" 5433 5434 5435 5440 55432; do
+        if pg_isready -h "${PGHOST}" -p "${p}" >/dev/null 2>&1; then
+            continue
+        fi
+        printf '%s\n' "${p}"
+        return 0
+    done
+    error "No free TCP port for project Postgres."
+    return 1
+}
+
+start_project_postgres() {
+    mkdir -p "${LIBRELANE_DATA_DIR}"
+    if [ ! -f "${PGDATA}/PG_VERSION" ]; then
+        step "initdb → ${PGDATA}"
+        initdb -D "${PGDATA}" --auth=trust --username=postgres --encoding=UTF8 --locale=C
+    fi
+    step "Starting project Postgres on ${PGHOST}:${PGPORT} ..."
+    pg_ctl -D "${PGDATA}" -l "${LIBRELANE_DATA_DIR}/postgres.log" \
+        -o "-p ${PGPORT} -h ${PGHOST} -k ${LIBRELANE_DATA_DIR} -c max_connections=200" start
+    STARTED_POSTGRES=true
+    printf '%s\n' "${PGPORT}" > "${LIBRELANE_DATA_DIR}/pg.port"
+    local i
+    for i in $(seq 1 30); do
+        postgres_ready && break
+        sleep 1
+    done
+    if ! postgres_ready; then
+        error "Postgres failed to start. See ${LIBRELANE_DATA_DIR}/postgres.log"
+        tail -n 40 "${LIBRELANE_DATA_DIR}/postgres.log" >&2 || true
+        exit 1
+    fi
+    info "Project Postgres is up (${PGHOST}:${PGPORT})"
+}
+
+restore_project_pg_port() {
+    local saved
+    [ -f "${LIBRELANE_DATA_DIR}/pg.port" ] || return 0
+    saved="$(tr -d '[:space:]' < "${LIBRELANE_DATA_DIR}/pg.port" 2>/dev/null || true)"
+    case "${saved}" in
+        ""|*[!0-9]*) return 0 ;;
+    esac
+    if our_postgres_running || pg_isready -h "${PGHOST}" -p "${saved}" >/dev/null 2>&1; then
+        if [ "${saved}" != "${PGPORT}" ]; then
+            info "Reusing project Postgres port ${saved}"
+            export PGPORT="${saved}"
+        fi
+    fi
+}
+
+ensure_schema() {
+    if ! app_db_ready; then
+        error "Database «${PGDATABASE}» is not reachable."
+        exit 1
+    fi
+    if schema_ready; then
+        info "App schema is up to date."
+        return 0
+    fi
+    step "Ensuring app schema ..."
+    PGPASSWORD="${PGPASSWORD}" psql -h "${PGHOST}" -p "${PGPORT}" -U "${PGUSER}" -d "${PGDATABASE}" \
+        -v ON_ERROR_STOP=1 -f "${SCRIPT_DIR}/database/ensure_schema.sql" >/dev/null
+    if ! schema_ready; then
+        error "Schema ensure ran but required tables are still missing."
+        exit 1
+    fi
+    info "App schema is ready."
+}
+
+ensure_postgres() {
+    export_runtime_env
+    restore_project_pg_port
+    if ! command -v initdb >/dev/null 2>&1 || ! command -v pg_ctl >/dev/null 2>&1; then
+        error "PostgreSQL tools missing. Enter via: nix develop ${FLAKE_DIR}"
+        exit 1
+    fi
+    if app_db_ready; then
+        info "Postgres ready at ${PGHOST}:${PGPORT} (database «${PGDATABASE}»)"
+        ensure_schema
+        return 0
+    fi
+    if our_postgres_running; then
+        if ! app_db_ready; then
+            try_bootstrap_app_db || exit 1
+        fi
+        ensure_schema
+        return 0
+    fi
+    if postgres_ready; then
+        if try_bootstrap_app_db && app_db_ready; then
+            ensure_schema
+            return 0
+        fi
+        local free
+        free="$(pick_free_pg_port)" || exit 1
+        export PGPORT="${free}"
+        start_project_postgres
+    else
+        start_project_postgres
+    fi
+    try_bootstrap_app_db || exit 1
+    ensure_schema
+}
+
+ensure_django_migrations() {
+    if command -v librelane-manage >/dev/null 2>&1; then
+        librelane-manage migrate --noinput
+        return 0
+    fi
+    error "librelane-manage missing from Nix shell."
+    exit 1
+}
+
+# WSL often cannot exec Nix node/npm shebangs correctly (bash ends up parsing
+# npm's JS: require('../lib/cli.js')). Mirror jadex_django: wrap node + npm-cli.js.
+nix_ld_linux() {
+    local probe ld
+    for probe in "$(command -v psql 2>/dev/null)" "$(command -v pg_ctl 2>/dev/null)" "$(command -v python 2>/dev/null)"; do
+        [ -n "${probe}" ] && [ -e "${probe}" ] || continue
+        ld="$(ldd "${probe}" 2>/dev/null | awk '/ld-linux/{print $1; exit}')"
+        case "${ld}" in
+            /nix/store/*)
+                [ -x "${ld}" ] || continue
+                printf '%s\n' "${ld}"
+                return 0
+                ;;
+        esac
+        ld="$(ldd "${probe}" 2>/dev/null | awk '/ld-linux/{print $3; exit}')"
+        case "${ld}" in
+            /nix/store/*)
+                [ -x "${ld}" ] || continue
+                printf '%s\n' "${ld}"
+                return 0
+                ;;
+        esac
+    done
+    return 1
+}
+
+file_is_elf() {
+    local f="${1:-}" magic
+    [ -f "${f}" ] || return 1
+    magic="$(od -An -N4 -tx1 "${f}" 2>/dev/null | tr -d ' \n')"
+    [ "${magic}" = "7f454c46" ]
+}
+
+nix_elf_library_path() {
+    local nix_ld
+    nix_ld="$(nix_ld_linux || true)"
+    if [ -z "${nix_ld}" ]; then
+        printf '%s\n' "${LD_LIBRARY_PATH:-}${LIBRARY_PATH:+:${LIBRARY_PATH}}"
+        return 0
+    fi
+    printf '%s\n' "$(dirname "${nix_ld}"):${LD_LIBRARY_PATH:-}${LIBRARY_PATH:+:${LIBRARY_PATH}}"
+}
+
+is_unix_node() {
+    local n="${1:-}"
+    [ -n "${n}" ] && [ -x "${n}" ] || return 1
+    case "${n}" in
+        *.exe|*.cmd|*.bat|/mnt/[a-zA-Z]/*|*/nix-bin/node|*ld-linux*) return 1 ;;
+    esac
+    return 0
+}
+
+librelane_node() {
+    local n p oldifs
+    n="$(command -v node 2>/dev/null || true)"
+    if is_unix_node "${n}"; then
+        printf '%s\n' "${n}"
+        return 0
+    fi
+    oldifs="${IFS}"
+    IFS=':'
+    for p in ${PATH}; do
+        IFS="${oldifs}"
+        if is_unix_node "${p}/node"; then
+            printf '%s\n' "${p}/node"
+            return 0
+        fi
+    done
+    IFS="${oldifs}"
+    error "Nix node binary not found on PATH"
+    return 1
+}
+
+resolve_node_elf() {
+    local n wrapped line
+    n="$(librelane_node)" || return 1
+    n="$(readlink -f "${n}" 2>/dev/null || printf '%s' "${n}")"
+    if file_is_elf "${n}"; then
+        printf '%s\n' "${n}"
+        return 0
+    fi
+    wrapped="$(dirname "${n}")/.node-wrapped"
+    if file_is_elf "${wrapped}"; then
+        printf '%s\n' "${wrapped}"
+        return 0
+    fi
+    if [ -f "${n}" ]; then
+        line="$(grep -oE '/nix/store/[^[:space:]\"'\'']+' "${n}" 2>/dev/null | while read -r p; do
+            case "${p}" in
+                *ld-linux*) continue ;;
+            esac
+            if file_is_elf "${p}"; then
+                printf '%s\n' "${p}"
+                break
+            fi
+        done)"
+        if [ -n "${line}" ]; then
+            printf '%s\n' "${line}"
+            return 0
+        fi
+    fi
+    printf '%s\n' "${n}"
+}
+
+ensure_node_wrappers() {
+    local dir="${LIBRELANE_DATA_DIR}/nix-bin"
+    local node_elf nix_ld lib_path prefix npm_js
+    mkdir -p "${dir}"
+    node_elf="$(resolve_node_elf)" || return 1
+    prefix="$(cd "$(dirname "${node_elf}")/.." && pwd)"
+    npm_js="${prefix}/lib/cli.js"
+    if [ ! -f "${npm_js}" ]; then
+        npm_js="${prefix}/lib/node_modules/npm/bin/npm-cli.js"
+    fi
+    if [ ! -f "${npm_js}" ]; then
+        npm_js="$(command -v npm 2>/dev/null || true)"
+        case "${npm_js}" in
+            *.cmd|*.bat|/mnt/[a-zA-Z]/*|*/nix-bin/npm) npm_js="" ;;
+        esac
+    fi
+    if [ ! -f "${npm_js}" ]; then
+        error "npm CLI not found next to ${node_elf}"
+        return 1
+    fi
+    nix_ld="$(nix_ld_linux || true)"
+    lib_path="$(nix_elf_library_path)"
+    rm -f "${dir}/node" "${dir}/npm" "${dir}/execpath-patch.cjs"
+    {
+        printf '%s\n' \
+            'try {' \
+            '  var w = process.env.LIBRELANE_NODE_WRAPPER;' \
+            '  if (w) {' \
+            '    Object.defineProperty(process, "execPath", { configurable: true, enumerable: true, value: w });' \
+            '    process.argv[0] = w;' \
+            '  }' \
+            '} catch (e) {}'
+    } | tr -d '\r' > "${dir}/execpath-patch.cjs"
+    if [ -n "${nix_ld}" ] && file_is_elf "${node_elf}"; then
+        {
+            printf '%s\n' \
+                '#!/bin/sh' \
+                "export LIBRELANE_NODE_WRAPPER='${dir}/node'" \
+                "exec '${nix_ld}' --library-path '${lib_path}' '${node_elf}' -r '${dir}/execpath-patch.cjs' \"\$@\""
+        } | tr -d '\r' > "${dir}/node"
+    else
+        {
+            printf '%s\n' \
+                '#!/bin/sh' \
+                "export LIBRELANE_NODE_WRAPPER='${dir}/node'" \
+                "exec '${node_elf}' -r '${dir}/execpath-patch.cjs' \"\$@\""
+        } | tr -d '\r' > "${dir}/node"
+    fi
+    {
+        printf '%s\n' \
+            '#!/bin/sh' \
+            "exec /bin/sh '${dir}/node' '${npm_js}' \"\$@\""
+    } | tr -d '\r' > "${dir}/npm"
+    chmod 755 "${dir}/node" "${dir}/npm"
+    case ":${PATH}:" in
+        *":${dir}:"*) ;;
+        *) export PATH="${dir}:${PATH}" ;;
+    esac
+}
+
+run_npm() {
+    ensure_node_wrappers || return 1
+    /bin/sh "${LIBRELANE_DATA_DIR}/nix-bin/npm" "$@"
 }
 
 ensure_pdk_download() {
@@ -628,16 +995,20 @@ ensure_pdk_download() {
     fi
     export_runtime_env
     if librelane-manage ensure_pdk --check-only >/dev/null 2>&1; then
-        info "PDK «${LIBRELANE_PDK_FAMILY}» ready under ${PDK_ROOT}"
+        info "Supported PDKs ready under ${PDK_ROOT}"
         return 0
     fi
-    step "First run: downloading sky130 PDK (~1 GB from FOSSi). This can take 30+ minutes …"
+    step "First run: downloading supported PDKs into ${PDK_ROOT}:"
+    info "  - sky130 (~1 GB)"
+    info "  - gf180mcu (~800 MB)"
+    info "  - ihp-sg13g2 (~1.5 GB)"
+    info "Sizes are approximate; first run can take a long time."
     if ! librelane-manage ensure_pdk; then
         error "PDK download failed."
         error "Check network access to https://fossi-foundation.github.io/ciel-releases"
         exit 1
     fi
-    info "PDK ready."
+    info "PDKs ready."
 }
 
 sanitize_ld_library_path() {
@@ -673,13 +1044,23 @@ kill_web_server() {
         pkill -f "librelane-web" 2>/dev/null || true
         pkill -f "${SCRIPT_DIR}/backend/manage.py runserver" 2>/dev/null || true
         pkill -f "manage.py runserver" 2>/dev/null || true
+        pkill -f "next dev" 2>/dev/null || true
+        pkill -f "next start" 2>/dev/null || true
+        pkill -f "next-server" 2>/dev/null || true
     fi
     kill_port_listeners "${LIBRELANE_WEB_PORT:-8000}"
+    kill_port_listeners "${PORT:-3000}"
 }
 
 stop_pid() {
     local pid="$1"
     [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null || return 0
+    local child
+    if command -v pgrep >/dev/null 2>&1; then
+        for child in $(pgrep -P "${pid}" 2>/dev/null || true); do
+            stop_pid "${child}"
+        done
+    fi
     kill -TERM "${pid}" 2>/dev/null || true
 }
 
@@ -689,30 +1070,106 @@ shutdown_stack() {
     CLEANING_UP=true
     trap - INT TERM EXIT
     echo ""
-    step "Stopping LibreLane web server ..."
+    step "Stopping LibreLane stack ..."
+    stop_pid "${FRONTEND_PID}"
+    stop_pid "${BACKEND_PID}"
     stop_pid "${WEB_PID}"
+    stop_pid "${BUILD_PID}"
     kill_web_server
-    WEB_PID=""
+    if [ "${STARTED_POSTGRES}" = true ] && our_postgres_running; then
+        step "Stopping project Postgres ..."
+        pg_ctl -D "${PGDATA}" stop -m fast >/dev/null 2>&1 || true
+    fi
+    FRONTEND_PID=""; BACKEND_PID=""; WEB_PID=""; BUILD_PID=""
     info "Stopped."
     if [ "${INTERRUPTED}" = true ]; then exit 0; fi
     exit "${code}"
 }
 
-start_web_server() {
+wait_for_http() {
+    local url="$1" label="$2" tries="${3:-60}"
+    local i code
+    for i in $(seq 1 "${tries}"); do
+        code="$(curl -sS -o /dev/null -m 2 -w '%{http_code}' "${url}" 2>/dev/null || echo "")"
+        case "${code}" in
+            [1-5][0-9][0-9]) return 0 ;;
+        esac
+        sleep 1
+    done
+    error "${label} did not become ready at ${url}"
+    return 1
+}
+
+start_backend() {
+    step "Starting Django API on :${BACKEND_PORT} ..."
+    ensure_django_migrations
     if command -v librelane-web >/dev/null 2>&1; then
-        step "Starting librelane-web on http://127.0.0.1:${LIBRELANE_WEB_PORT} ..."
-        librelane-web &
-        WEB_PID=$!
-        wait "${WEB_PID}"
-        return
+        # librelane-web also migrates; env already set.
+        LIBRELANE_WEB_HOST="${HOST}" LIBRELANE_WEB_PORT="${BACKEND_PORT}" librelane-web \
+            >"${LIBRELANE_DATA_DIR}/backend.log" 2>&1 &
+        BACKEND_PID=$!
+    elif command -v librelane-manage >/dev/null 2>&1; then
+        librelane-manage runserver "${HOST}:${BACKEND_PORT}" \
+            >"${LIBRELANE_DATA_DIR}/backend.log" 2>&1 &
+        BACKEND_PID=$!
+    else
+        error "Neither librelane-web nor librelane-manage found in Nix environment."
+        exit 1
     fi
-    step "librelane-web not in PATH - using manage.py runserver ..."
-    if command -v librelane-manage >/dev/null 2>&1; then
-        librelane-manage migrate --noinput
-        exec librelane-manage runserver "${LIBRELANE_WEB_HOST}:${LIBRELANE_WEB_PORT}"
+    echo "${BACKEND_PID}" >"${LIBRELANE_DATA_DIR}/backend.pid"
+    if wait_for_http "http://127.0.0.1:${BACKEND_PORT}/" "Backend" 80; then
+        info "Backend API: http://127.0.0.1:${BACKEND_PORT}"
+        return 0
     fi
-    error "Neither librelane-web nor librelane-manage found in Nix environment."
+    error "Backend did not become ready. Last log lines:"
+    tail -n 40 "${LIBRELANE_DATA_DIR}/backend.log" >&2 || true
     exit 1
+}
+
+start_frontend() {
+    step "Starting Next.js frontend on :${PORT} ..."
+    cd "${SCRIPT_DIR}/frontend"
+    mkdir -p .next
+    if [ ! -d node_modules ]; then
+        step "npm install (first time) ..."
+        run_npm install
+    fi
+    case "${SCRIPT_DIR}" in
+        /mnt/*)
+            export WATCHPACK_POLLING=true
+            export CHOKIDAR_USEPOLLING=true
+            ;;
+    esac
+    if [ "${FRONTEND_BUILD}" = true ]; then
+        step "Building production UI ..."
+        DJANGO_ORIGIN="${DJANGO_ORIGIN}" NEXT_ORIGIN="${NEXT_ORIGIN}" run_npm run build
+        DJANGO_ORIGIN="${DJANGO_ORIGIN}" PORT="${PORT}" HOST="${HOST}" \
+            run_npm run start -- --port "${PORT}" --hostname "${HOST}" \
+            >"${LIBRELANE_DATA_DIR}/frontend.log" 2>&1 &
+    else
+        info "Dev frontend (next dev)"
+        DJANGO_ORIGIN="${DJANGO_ORIGIN}" PORT="${PORT}" HOST="${HOST}" \
+            run_npm run dev -- --port "${PORT}" --hostname "${HOST}" \
+            >"${LIBRELANE_DATA_DIR}/frontend.log" 2>&1 &
+    fi
+    FRONTEND_PID=$!
+    echo "${FRONTEND_PID}" >"${LIBRELANE_DATA_DIR}/frontend.pid"
+    cd "${SCRIPT_DIR}"
+    if wait_for_http "http://127.0.0.1:${PORT}/login" "Frontend" 120; then
+        :
+    else
+        error "Frontend did not become ready. See ${LIBRELANE_DATA_DIR}/frontend.log"
+        tail -n 40 "${LIBRELANE_DATA_DIR}/frontend.log" >&2 || true
+        exit 1
+    fi
+    echo ""
+    info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    info "  App UI:  http://127.0.0.1:${PORT}"
+    info "  API:     http://127.0.0.1:${BACKEND_PORT}"
+    info "  Ctrl+C stops frontend, backend, and Postgres."
+    info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    wait "${FRONTEND_PID}" || true
 }
 
 launch_stack() {
@@ -721,17 +1178,20 @@ launch_stack() {
     trap 'INTERRUPTED=true; shutdown_stack' INT
     trap 'INTERRUPTED=true; shutdown_stack' TERM
     trap shutdown_stack EXIT
-    step "Clearing leftover listeners on :${LIBRELANE_WEB_PORT} ..."
+    step "Clearing leftover listeners on :${BACKEND_PORT} / :${PORT} ..."
     kill_web_server
     sleep 0.3
+    ensure_postgres
     if [ "${PREP_ONLY}" = true ]; then
         ensure_pdk_download
-        info "Prep-only - Nix env, PDK, and data dir ready."
+        ensure_django_migrations
+        info "Prep-only - Nix env, Postgres schema, PDK, and data dir ready."
         trap - INT TERM EXIT
         return 0
     fi
     ensure_pdk_download
-    start_web_server
+    start_backend
+    start_frontend
 }
 
 run_inside_nix() {

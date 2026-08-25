@@ -2,20 +2,36 @@ from __future__ import annotations
 
 import io
 import json
-import shutil
 import threading
 from pathlib import Path
 
 from django.conf import settings
 from django.http import FileResponse, Http404, HttpRequest, HttpResponse, JsonResponse
-from django.shortcuts import get_object_or_404, redirect, render
-from django.urls import reverse
-from django.views.decorators.http import require_http_methods, require_POST
+from django.shortcuts import get_object_or_404, redirect
+from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
-from flow.models import FlowRun, FlowStepResult
+from flow.auth_helpers import (
+    COOKIE_MAX_AGE_SESSION,
+    classify_invalid_session,
+    clear_session_cookies,
+    email_in_use,
+    expects_html,
+    generate_session_nonce,
+    get_cookie,
+    get_user,
+    json_session_unauthorized,
+    normalize_email,
+    normalize_session_end_reason,
+    parse_auth_body,
+    require_signed_in_username,
+    set_cookie,
+)
+from flow.models import FlowRun, FlowStepResult, User
+from flow.pdk_catalog import SUPPORTED_PDK_VARIANT_LIST, family_for_variant
 from flow.services.downloads import (
     build_preview_svg,
     build_step_zip,
+    preview_source_db_file,
     preview_source_download_filename,
     preview_source_file,
     preview_source_info,
@@ -28,14 +44,42 @@ from flow.services.downloads import (
 from flow.services.runner import FlowRunner
 from flow.services.setup import librelane_version
 from flow.services.step_output import output_has_content
+from flow.services.verilog import require_top_module_verilog, verilog_path_for
+from flow.services.workdir import remove_run_temp
 from flow.steps import NOTEBOOK_STEPS
 
 _flow_threads: dict[int, threading.Thread] = {}
+_ACTIVE_STATUSES = (
+    FlowRun.Status.SETTING_UP,
+    FlowRun.Status.RUNNING,
+)
 
 
 def _is_active(run_id: int) -> bool:
     thread = _flow_threads.get(run_id)
     return thread is not None and thread.is_alive()
+
+
+def _user_has_active_run(user: User, *, exclude_run_id: int | None = None) -> bool:
+    qs = FlowRun.objects.filter(owner_user=user, status__in=_ACTIVE_STATUSES)
+    if exclude_run_id is not None:
+        qs = qs.exclude(pk=exclude_run_id)
+    for run in qs:
+        if _is_active(run.pk) or run.status in _ACTIVE_STATUSES:
+            return True
+    # Also treat in-memory threads for this user's runs.
+    for run_id, thread in list(_flow_threads.items()):
+        if not thread.is_alive():
+            continue
+        if exclude_run_id is not None and run_id == exclude_run_id:
+            continue
+        try:
+            other = FlowRun.objects.get(pk=run_id)
+        except FlowRun.DoesNotExist:
+            continue
+        if other.owner_user_id == user.id:
+            return True
+    return False
 
 
 def _clear_stale_running(run: FlowRun) -> None:
@@ -54,8 +98,8 @@ def _clear_stale_running(run: FlowRun) -> None:
         run.status = FlowRun.Status.FAILED
         if not run.error_message:
             run.error_message = (
-                "Setup timed out. Download the PDK on first ./run.sh startup "
-                "(wait for “PDK ready” in the terminal), then click Setup PDK again."
+                "Setup timed out. Download PDKs on first ./run.sh startup "
+                "(wait for “PDKs ready” in the terminal), then click Setup PDK again."
             )
         run.save(update_fields=["status", "error_message", "updated_at"])
         return
@@ -71,55 +115,21 @@ def _clear_stale_running(run: FlowRun) -> None:
     run.save(update_fields=["status", "updated_at"])
 
 
-def _redirect_watch(run_id: int, step: int | None = None) -> HttpResponse:
-    url = reverse("run_detail", args=[run_id]) + "?watch=1"
-    if step is not None:
-        url += f"#step-{step}"
-    return redirect(url)
-
-
-def _path_within(path: Path, root: Path) -> bool:
+def _json_body(request: HttpRequest) -> dict:
+    if not request.body:
+        return {}
     try:
-        path.resolve().relative_to(root.resolve())
-        return True
+        data = json.loads(request.body)
+        return data if isinstance(data, dict) else {}
     except Exception:
-        return False
+        return {}
 
 
-def _remove_run_artifacts(run: FlowRun) -> None:
-    runs_root = Path(settings.RUNS_DIR).resolve()
-    data_root = Path(settings.DATA_DIR).resolve()
-    candidate_paths: list[Path] = []
-
-    if run.work_dir:
-        candidate_paths.append(Path(run.work_dir))
-
-    candidate_paths.append(runs_root / f"run_{run.pk}")
-
-    for step in run.steps.all():
-        step_dir = (step.output or {}).get("step_dir")
-        if step_dir:
-            candidate_paths.append(Path(step_dir))
-
-    seen: set[Path] = set()
-    for path in candidate_paths:
-        try:
-            resolved = path.resolve()
-        except OSError:
-            continue
-        if resolved in seen:
-            continue
-        seen.add(resolved)
-        if not resolved.exists():
-            continue
-        if not (
-            _path_within(resolved, runs_root) or _path_within(resolved, data_root)
-        ):
-            continue
-        if resolved.is_dir():
-            shutil.rmtree(resolved)
-        else:
-            resolved.unlink()
+def _parse_request_data(request: HttpRequest) -> dict:
+    data = _json_body(request)
+    if data:
+        return data
+    return {k: request.POST.get(k) for k in request.POST.keys()}
 
 
 def _start_background(
@@ -151,41 +161,274 @@ def _start_background(
     thread.start()
 
 
-@require_http_methods(["GET"])
-def home(request: HttpRequest) -> HttpResponse:
-    runs = FlowRun.objects.order_by("-created_at")[:20]
+def _run_to_dict(run: FlowRun, *, include_steps: bool = False) -> dict:
+    data = {
+        "id": run.pk,
+        "name": run.name,
+        "status": run.status,
+        "design_name": run.design_name,
+        "top_module_name": run.design_name,
+        "pdk": run.pdk,
+        "pdk_family": run.pdk_family,
+        "pdk_root": run.pdk_root,
+        "clock_period": run.clock_period,
+        "work_dir": run.work_dir,
+        "temp_folder_name": run.temp_folder_name,
+        "current_step_index": run.current_step_index,
+        "error_message": run.error_message,
+        "setup_log": run.setup_log,
+        "artifacts_stored": run.artifacts_stored,
+        "created_at": run.created_at.isoformat() if run.created_at else None,
+        "updated_at": run.updated_at.isoformat() if run.updated_at else None,
+        "is_running": _is_active(run.pk),
+        "owner_username": run.owner_user.username if run.owner_user_id else None,
+    }
+    if include_steps:
+        data["steps"] = [
+            {
+                "order": s.order,
+                "step_id": s.step_id,
+                "title": s.title,
+                "status": s.status,
+                "log": s.log,
+                "summary": s.summary,
+                "output": s.output or {},
+                "has_output": output_has_content(s.output),
+                "can_download_zip": step_can_download_zip(run, s),
+                "can_download_svg": step_can_download_svg(run, s),
+                "can_download_preview_source": step_can_download_preview_source(run, s),
+                "preview_source_name": (
+                    (preview_source_info(run, s) or {}).get("name")
+                    or (getattr(preview_source_db_file(run, s), "relative_path", "") or "").split("/")[-1]
+                ),
+                "description": NOTEBOOK_STEPS[s.order].description
+                if s.order < len(NOTEBOOK_STEPS)
+                else "",
+            }
+            for s in run.steps.all()
+        ]
+    return data
+
+
+def _owned_run(request: HttpRequest, run_id: int) -> tuple[FlowRun | None, HttpResponse | None]:
+    username, err = require_signed_in_username(request)
+    if err:
+        return None, err
+    user = get_user(username or "")
+    if user is None:
+        return None, json_session_unauthorized("expired")
+    run = get_object_or_404(FlowRun, pk=run_id, owner_user=user)
+    return run, None
+
+
+def redirect_to_next(request: HttpRequest, path: str = "/") -> HttpResponse:
+    origin = getattr(settings, "NEXT_ORIGIN", "http://127.0.0.1:3000").rstrip("/")
+    response = HttpResponse(status=302)
+    response["Location"] = f"{origin}{path}"
+    return response
+
+
+@require_http_methods(["GET", "POST"])
+def signup(request: HttpRequest) -> HttpResponse:
+    if request.method == "GET":
+        return redirect_to_next(request, "/signup")
+    body = parse_auth_body(request)
+    if not body:
+        return JsonResponse(
+            {"error": "Invalid request body. Expected JSON with the required fields."},
+            status=400,
+        )
+    if not body["username"] or not body["password"] or not body.get("email"):
+        return JsonResponse(
+            {"error": "All fields are required: username, email, and password."},
+            status=400,
+        )
+    email = normalize_email(body.get("email"))
+    if not email:
+        return JsonResponse({"error": "Email is required"}, status=400)
+    if email_in_use(email):
+        return JsonResponse({"error": "An account with this email already exists."}, status=409)
+    if User.objects.filter(username=body["username"]).exists():
+        return JsonResponse(
+            {"error": "That username is already taken. Choose a different username."},
+            status=409,
+        )
+    try:
+        User.objects.create(
+            username=body["username"],
+            password=body["password"],
+            email=email,
+            first_name=str(body.get("first_name") or "")[:100],
+            last_name=str(body.get("last_name") or "")[:100],
+        )
+    except Exception:
+        return JsonResponse(
+            {"error": "Could not create the account. The username may already exist."},
+            status=409,
+        )
+    if expects_html(request):
+        return redirect_to_next(request, "/login?reason=signup_ok")
+    return JsonResponse({"status": "ok"}, status=201)
+
+
+@require_http_methods(["GET", "POST"])
+def login(request: HttpRequest) -> HttpResponse:
+    if request.method == "GET":
+        return redirect_to_next(request, "/login")
+    body = parse_auth_body(request)
+    if not body:
+        return JsonResponse(
+            {"error": "Invalid request body. Expected JSON with the required fields."},
+            status=400,
+        )
+    try:
+        User.objects.get(username=body["username"], password=body["password"])
+    except User.DoesNotExist:
+        if expects_html(request):
+            return redirect_to_next(request, "/login?reason=bad_creds")
+        return JsonResponse(
+            {"error": "Invalid username or password. Check your credentials and try again."},
+            status=401,
+        )
+    nonce = generate_session_nonce()
+    User.objects.filter(username=body["username"]).update(session_nonce=nonce)
+    response = (
+        redirect_to_next(request, "/")
+        if expects_html(request)
+        else JsonResponse({"status": "ok"})
+    )
+    clear_session_cookies(response)
+    set_cookie(response, "username", body["username"], COOKIE_MAX_AGE_SESSION)
+    set_cookie(response, "session_nonce", nonce, COOKIE_MAX_AGE_SESSION)
+    return response
+
+
+@require_GET
+def logout(request: HttpRequest) -> HttpResponse:
+    username = get_cookie(request, "username")
+    if username:
+        User.objects.filter(username=username).update(session_nonce="")
+    response = redirect_to_next(request, "/login?reason=logged_out")
+    clear_session_cookies(response)
+    return response
+
+
+@require_GET
+def session_end(request: HttpRequest) -> HttpResponse:
+    reason_param = request.GET.get("reason")
+    if reason_param:
+        reason = normalize_session_end_reason(reason_param)
+    else:
+        reason = classify_invalid_session(request)
+    response = redirect_to_next(request, f"/login?reason={reason}")
+    clear_session_cookies(response)
+    return response
+
+
+@require_http_methods(["GET", "POST"])
+def api_session_ping(request: HttpRequest) -> JsonResponse:
+    username, err = require_signed_in_username(request)
+    if err:
+        return err  # type: ignore[return-value]
+    return JsonResponse({"status": "ok", "username": username})
+
+
+@require_GET
+def api_home(request: HttpRequest) -> JsonResponse:
+    username, err = require_signed_in_username(request)
+    if err:
+        return err  # type: ignore[return-value]
+    user = get_user(username or "")
+    if user is None:
+        return json_session_unauthorized("expired")
+
+    runs = FlowRun.objects.filter(owner_user=user).order_by("-created_at")[:20]
+    for run in runs:
+        _clear_stale_running(run)
     try:
         version = librelane_version()
     except Exception:
         version = "unknown (enter nix develop first)"
-    return render(
-        request,
-        "flow/home.html",
+
+    busy = _user_has_active_run(user)
+    return JsonResponse(
         {
-            "runs": runs,
+            "username": username,
             "librelane_version": version,
             "default_pdk": settings.LIBRELANE_PDK,
-            "default_pdk_family": settings.LIBRELANE_PDK_FAMILY,
-            "step_catalog": NOTEBOOK_STEPS,
-        },
+            "pdk_variants": SUPPORTED_PDK_VARIANT_LIST,
+            "step_catalog": [
+                {"step_id": s.step_id, "title": s.title, "description": s.description}
+                for s in NOTEBOOK_STEPS
+            ],
+            "busy": busy,
+            "runs": [_run_to_dict(r) for r in FlowRun.objects.filter(owner_user=user).order_by("-created_at")[:20]],
+        }
     )
 
 
-@require_POST
+@require_http_methods(["POST"])
 def create_run(request: HttpRequest) -> HttpResponse:
+    username, err = require_signed_in_username(request)
+    if err:
+        return err
+    user = get_user(username or "")
+    if user is None:
+        return json_session_unauthorized("expired")
+
+    if _user_has_active_run(user):
+        # Clear stale markers from crashed workers, then re-check.
+        for stale in FlowRun.objects.filter(owner_user=user, status__in=_ACTIVE_STATUSES):
+            _clear_stale_running(stale)
+        if _user_has_active_run(user):
+            return JsonResponse(
+                {
+                    "error": (
+                        "You already have a run in progress. "
+                        "Finish or wait for it before starting a new one."
+                    )
+                },
+                status=409,
+            )
+
+    data = _parse_request_data(request)
+    top_module = str(
+        data.get("top_module_name")
+        or data.get("design_name")
+        or settings.LIBRELANE_DESIGN_NAME
+    ).strip()
+    try:
+        require_top_module_verilog(top_module)
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+
+    pdk = str(data.get("pdk") or settings.LIBRELANE_PDK).strip()
+    try:
+        pdk_family = family_for_variant(pdk)
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+
+    run_name = str(data.get("name") or top_module)
     run = FlowRun.objects.create(
-        design_name=request.POST.get("design_name", settings.LIBRELANE_DESIGN_NAME),
-        pdk=request.POST.get("pdk", settings.LIBRELANE_PDK),
-        pdk_family=request.POST.get("pdk_family", settings.LIBRELANE_PDK_FAMILY),
-        pdk_root=request.POST.get("pdk_root", settings.PDK_ROOT),
-        clock_period=float(request.POST.get("clock_period", "10")),
+        owner_user=user,
+        name=run_name[:256],
+        design_name=top_module[:128],
+        pdk=pdk[:64],
+        pdk_family=pdk_family[:64],
+        pdk_root=settings.PDK_ROOT,
+        clock_period=float(data.get("clock_period") or 10),
     )
-    return redirect("run_detail", run_id=run.pk)
+    if expects_html(request):
+        return redirect_to_next(request, f"/?id={run.pk}")
+    return JsonResponse({"status": "ok", "run": _run_to_dict(run)}, status=201)
 
 
-@require_http_methods(["GET"])
-def run_detail(request: HttpRequest, run_id: int) -> HttpResponse:
-    run = get_object_or_404(FlowRun, pk=run_id)
+@require_GET
+def run_detail(request: HttpRequest, run_id: int) -> JsonResponse:
+    run, err = _owned_run(request, run_id)
+    if err:
+        return err  # type: ignore[return-value]
+    assert run is not None
     _clear_stale_running(run)
     run.refresh_from_db()
 
@@ -198,106 +441,112 @@ def run_detail(request: HttpRequest, run_id: int) -> HttpResponse:
                 step_id=spec.step_id,
                 title=spec.title,
             )
-        steps = list(run.steps.all())
 
-    verilog_path = settings.DESIGNS_DIR / f"{run.design_name}.v"
+    verilog_path = verilog_path_for(run.design_name)
     verilog_source = ""
     if verilog_path.is_file():
         verilog_source = verilog_path.read_text(encoding="utf-8")
 
-    steps_info = []
-    for s in steps:
-        src = preview_source_info(run, s)
-        steps_info.append(
-            {
-                "step": s,
-                "description": NOTEBOOK_STEPS[s.order].description,
-                "output_json": json.dumps(s.output or {}),
-                "has_output": output_has_content(s.output),
-                "can_download_zip": step_can_download_zip(run, s),
-                "can_download_svg": step_can_download_svg(run, s),
-                "can_download_preview_source": step_can_download_preview_source(run, s),
-                "preview_source_name": src.get("name", "") if src else "",
-            }
-        )
+    payload = _run_to_dict(run, include_steps=True)
+    payload["verilog_source"] = verilog_source
+    return JsonResponse(payload)
 
-    return render(
-        request,
-        "flow/run_detail.html",
-        {
-            "run": run,
-            "steps_info": steps_info,
-            "verilog_source": verilog_source,
-            "is_running": _is_active(run.pk),
-            "watch": request.GET.get("watch") == "1",
-        },
-    )
+
+def _reject_if_top_module_invalid(run: FlowRun) -> JsonResponse | None:
+    try:
+        require_top_module_verilog(run.design_name)
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    return None
 
 
 @require_POST
 def run_setup(request: HttpRequest, run_id: int) -> HttpResponse:
-    get_object_or_404(FlowRun, pk=run_id)
-    if not _is_active(run_id):
-        _start_background(run_id, run_all=False, target="setup")
-    return _redirect_watch(run_id)
+    run, err = _owned_run(request, run_id)
+    if err:
+        return err
+    assert run is not None
+    bad = _reject_if_top_module_invalid(run)
+    if bad:
+        return bad
+    user = run.owner_user
+    if _user_has_active_run(user, exclude_run_id=run.pk) or _is_active(run.pk):
+        return JsonResponse(
+            {"error": "A run is already in progress. Wait until it finishes."},
+            status=409,
+        )
+    _start_background(run.pk, run_all=False, target="setup")
+    if expects_html(request):
+        return redirect_to_next(request, f"/?id={run.pk}")
+    return JsonResponse({"status": "ok", "run": _run_to_dict(run)})
 
 
 @require_POST
 def run_all(request: HttpRequest, run_id: int) -> HttpResponse:
-    get_object_or_404(FlowRun, pk=run_id)
-    if not _is_active(run_id):
-        _start_background(run_id, run_all=True)
-    return _redirect_watch(run_id)
+    run, err = _owned_run(request, run_id)
+    if err:
+        return err
+    assert run is not None
+    bad = _reject_if_top_module_invalid(run)
+    if bad:
+        return bad
+    user = run.owner_user
+    if _user_has_active_run(user, exclude_run_id=run.pk) or _is_active(run.pk):
+        return JsonResponse(
+            {"error": "A run is already in progress. Wait until it finishes."},
+            status=409,
+        )
+    _start_background(run.pk, run_all=True)
+    if expects_html(request):
+        return redirect_to_next(request, f"/runs/{run.pk}?watch=1")
+    return JsonResponse({"status": "ok", "run": _run_to_dict(run)})
 
 
 @require_POST
 def run_step(request: HttpRequest, run_id: int, order: int) -> HttpResponse:
-    get_object_or_404(FlowRun, pk=run_id)
-    if not _is_active(run_id):
-        _start_background(run_id, run_all=False, step_order=order)
-    return _redirect_watch(run_id, step=order)
+    run, err = _owned_run(request, run_id)
+    if err:
+        return err
+    assert run is not None
+    bad = _reject_if_top_module_invalid(run)
+    if bad:
+        return bad
+    user = run.owner_user
+    if _user_has_active_run(user, exclude_run_id=run.pk) or _is_active(run.pk):
+        return JsonResponse(
+            {"error": "A run is already in progress. Wait until it finishes."},
+            status=409,
+        )
+    _start_background(run.pk, run_all=False, step_order=order)
+    if expects_html(request):
+        return redirect_to_next(
+            request, f"/runs/{run.pk}?watch=1#step-{order}"
+        )
+    return JsonResponse({"status": "ok", "run": _run_to_dict(run)})
 
 
-@require_http_methods(["GET"])
+@require_GET
 def run_status(request: HttpRequest, run_id: int) -> JsonResponse:
-    run = get_object_or_404(FlowRun, pk=run_id)
+    run, err = _owned_run(request, run_id)
+    if err:
+        return err  # type: ignore[return-value]
+    assert run is not None
     _clear_stale_running(run)
     run.refresh_from_db()
-
-    steps = [
-        {
-            "order": s.order,
-            "step_id": s.step_id,
-            "title": s.title,
-            "status": s.status,
-            "log": s.log,
-            "summary": s.summary,
-            "output": s.output or {},
-        }
-        for s in run.steps.all()
-    ]
-    return JsonResponse(
-        {
-            "id": run.pk,
-            "status": run.status,
-            "current_step_index": run.current_step_index,
-            "error_message": run.error_message,
-            "setup_log": run.setup_log,
-            "is_running": _is_active(run.pk),
-            "steps": steps,
-        }
-    )
+    return JsonResponse(_run_to_dict(run, include_steps=True))
 
 
-def _get_run_step(run_id: int, order: int) -> tuple[FlowRun, FlowStepResult]:
-    run = get_object_or_404(FlowRun, pk=run_id)
-    step = get_object_or_404(FlowStepResult, run=run, order=order)
-    return run, step
+def _get_run_step(run: FlowRun, order: int) -> FlowStepResult:
+    return get_object_or_404(FlowStepResult, run=run, order=order)
 
 
 @require_http_methods(["GET"])
 def download_step_zip(request: HttpRequest, run_id: int, order: int) -> FileResponse:
-    run, step = _get_run_step(run_id, order)
+    run, err = _owned_run(request, run_id)
+    if err:
+        return err  # type: ignore[return-value]
+    assert run is not None
+    step = _get_run_step(run, order)
     data = build_step_zip(run, step)
     response = FileResponse(
         io.BytesIO(data),
@@ -313,7 +562,11 @@ def download_step_zip(request: HttpRequest, run_id: int, order: int) -> FileResp
 def download_step_preview_svg(
     request: HttpRequest, run_id: int, order: int
 ) -> FileResponse:
-    run, step = _get_run_step(run_id, order)
+    run, err = _owned_run(request, run_id)
+    if err:
+        return err  # type: ignore[return-value]
+    assert run is not None
+    step = _get_run_step(run, order)
     try:
         data = build_preview_svg(run, step)
     except Http404:
@@ -335,31 +588,56 @@ def download_step_preview_svg(
 def download_step_preview_source(
     request: HttpRequest, run_id: int, order: int
 ) -> FileResponse:
-    run, step = _get_run_step(run_id, order)
+    run, err = _owned_run(request, run_id)
+    if err:
+        return err  # type: ignore[return-value]
+    assert run is not None
+    step = _get_run_step(run, order)
     path = preview_source_file(run, step)
-    if path is None:
+    if path is not None:
+        import mimetypes
+
+        content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        return FileResponse(
+            open(path, "rb"),
+            as_attachment=True,
+            filename=preview_source_download_filename(run, step),
+            content_type=content_type,
+        )
+
+    row = preview_source_db_file(run, step)
+    if row is None:
         raise Http404("No layout source file for this step preview.")
-
-    import mimetypes
-
-    content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-    response = FileResponse(
-        open(path, "rb"),
+    name = Path(row.relative_path).name
+    return FileResponse(
+        io.BytesIO(bytes(row.content)),
         as_attachment=True,
-        filename=preview_source_download_filename(run, step),
-        content_type=content_type,
+        filename=name or preview_source_download_filename(run, step),
+        content_type=row.content_type or "application/octet-stream",
     )
-    return response
 
 
 @require_POST
 def delete_run(request: HttpRequest, run_id: int) -> HttpResponse:
-    run = get_object_or_404(FlowRun, pk=run_id)
+    run, err = _owned_run(request, run_id)
+    if err:
+        return err
+    assert run is not None
 
     if _is_active(run_id):
-        return redirect("run_detail", run_id=run_id)
+        return JsonResponse(
+            {"error": "Cannot delete a run while it is still executing."},
+            status=409,
+        )
 
     _flow_threads.pop(run_id, None)
-    _remove_run_artifacts(run)
+    remove_run_temp(run)
     run.delete()
-    return redirect("home")
+    if expects_html(request):
+        return redirect_to_next(request, "/")
+    return JsonResponse({"status": "ok"})
+
+
+@require_GET
+def root_redirect(request: HttpRequest) -> HttpResponse:
+    return redirect_to_next(request, "/")

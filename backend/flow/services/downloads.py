@@ -11,7 +11,7 @@ from pathlib import Path
 from django.conf import settings
 from django.http import Http404
 
-from flow.models import FlowRun, FlowStepResult
+from flow.models import FlowRun, FlowRunFile, FlowStepResult
 
 _PREVIEW_IMG_RE = re.compile(
     r'<img\s+[^>]*src=["\']data:image/(?P<fmt>png|jpeg|jpg);base64,(?P<data>[^"\']+)["\']',
@@ -122,9 +122,40 @@ def files_for_step_zip(run: FlowRun, step: FlowStepResult) -> list[Path]:
     return sorted(paths, key=lambda p: str(p).lower())
 
 
+def _step_dir_prefix(step: FlowStepResult) -> str:
+    slug = _slugify_step_id(step.step_id)
+    return f"{step.order + 1}-{slug}"
+
+
+def db_files_for_step(run: FlowRun, step: FlowStepResult) -> list[FlowRunFile]:
+    if not run.artifacts_stored:
+        return []
+    prefix = _step_dir_prefix(step)
+    rows = list(FlowRunFile.objects.filter(run=run).order_by("relative_path"))
+    matched = [r for r in rows if r.relative_path == prefix or r.relative_path.startswith(prefix + "/")]
+    if matched:
+        return matched
+    # Fallback: any artifact path listed in step.output
+    artifact_paths = {
+        str(a.get("path", "")).replace("\\", "/").lstrip("/")
+        for a in (step.output or {}).get("artifacts") or []
+        if a.get("path")
+    }
+    return [r for r in rows if r.relative_path in artifact_paths]
+
+
+def _is_directory_row(row: FlowRunFile) -> bool:
+    return row.content_type == "inode/directory" or (
+        row.size_bytes == 0 and bytes(row.content) == b"" and not Path(row.relative_path).suffix
+    )
+
+
 def build_step_zip(run: FlowRun, step: FlowStepResult) -> bytes:
     files = files_for_step_zip(run, step)
-    if not files:
+    db_files = [] if files else db_files_for_step(run, step)
+    db_payload = [r for r in db_files if not _is_directory_row(r)]
+    db_dirs = [r for r in db_files if _is_directory_row(r)]
+    if not files and not db_payload and not db_dirs:
         raise Http404("No output files for this step.")
 
     work_dir = work_dir_for_run(run)
@@ -144,6 +175,10 @@ def build_step_zip(run: FlowRun, step: FlowStepResult) -> bytes:
                     except ValueError:
                         pass
             zf.write(path, arcname=arcname)
+        for row in db_dirs:
+            zf.writestr(row.relative_path.rstrip("/") + "/", b"")
+        for row in db_payload:
+            zf.writestr(row.relative_path, bytes(row.content))
     buffer.seek(0)
     return buffer.getvalue()
 
@@ -189,10 +224,36 @@ def _png_bytes_from_preview_html(preview_html: str) -> tuple[bytes, str] | None:
     return data, fmt
 
 
+def _db_preview_svg_bytes(run: FlowRun, step: FlowStepResult) -> bytes | None:
+    if not run.artifacts_stored:
+        return None
+    prefix = _step_dir_prefix(step)
+    candidates = [
+        f"{prefix}/preview.svg",
+        "preview.svg",
+    ]
+    rel = (step.output or {}).get("preview_svg")
+    if rel:
+        candidates.insert(0, str(rel).replace("\\", "/").lstrip("/"))
+    for path in candidates:
+        try:
+            row = FlowRunFile.objects.get(run=run, relative_path=path)
+        except FlowRunFile.DoesNotExist:
+            continue
+        data = bytes(row.content)
+        if data:
+            return data
+    return None
+
+
 def build_preview_svg(run: FlowRun, step: FlowStepResult) -> bytes:
     on_disk = preview_svg_path(run, step)
     if on_disk is not None:
         return on_disk.read_bytes()
+
+    from_db = _db_preview_svg_bytes(run, step)
+    if from_db is not None:
+        return from_db
 
     output = step.output or {}
     preview_html = output.get("preview_html") or ""
@@ -285,15 +346,39 @@ def preview_source_file(run: FlowRun, step: FlowStepResult) -> Path | None:
     return path if path.is_file() else None
 
 
+def preview_source_db_file(run: FlowRun, step: FlowStepResult) -> FlowRunFile | None:
+    if not run.artifacts_stored:
+        return None
+    info = (step.output or {}).get("preview_source")
+    candidates: list[str] = []
+    if isinstance(info, dict) and info.get("path"):
+        candidates.append(str(info["path"]).replace("\\", "/").lstrip("/"))
+        if info.get("name"):
+            candidates.append(f"{_step_dir_prefix(step)}/{info['name']}")
+    prefix = _step_dir_prefix(step)
+    for pattern_suffix in (".gds", ".def"):
+        candidates.append(f"{prefix}/*{pattern_suffix}")
+    for row in FlowRunFile.objects.filter(run=run).order_by("relative_path"):
+        if _is_directory_row(row):
+            continue
+        rel = row.relative_path
+        if rel in candidates:
+            return row
+        if rel.startswith(prefix + "/") and rel.lower().endswith((".gds", ".def")):
+            return row
+    return None
+
+
 def step_can_download_preview_source(run: FlowRun, step: FlowStepResult) -> bool:
     output = step.output or {}
     if not (
         output.get("preview_html")
         or output.get("preview_svg")
         or preview_svg_path(run, step) is not None
+        or _db_preview_svg_bytes(run, step) is not None
     ):
         return False
-    return preview_source_file(run, step) is not None
+    return preview_source_file(run, step) is not None or preview_source_db_file(run, step) is not None
 
 
 def preview_source_download_filename(run: FlowRun, step: FlowStepResult) -> str:
@@ -304,11 +389,15 @@ def preview_source_download_filename(run: FlowRun, step: FlowStepResult) -> str:
 
 
 def step_can_download_zip(run: FlowRun, step: FlowStepResult) -> bool:
-    return bool(files_for_step_zip(run, step))
+    if files_for_step_zip(run, step):
+        return True
+    return any(not _is_directory_row(r) for r in db_files_for_step(run, step))
 
 
 def step_can_download_svg(run: FlowRun, step: FlowStepResult) -> bool:
     if preview_svg_path(run, step) is not None:
+        return True
+    if _db_preview_svg_bytes(run, step) is not None:
         return True
     output = step.output or {}
     if output.get("preview_html") or output.get("preview_svg"):

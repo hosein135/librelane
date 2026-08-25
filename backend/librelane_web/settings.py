@@ -16,7 +16,7 @@ def _project_root() -> Path:
 
 
 def _data_dir() -> Path:
-    """Writable directory for SQLite DB and flow run artifacts."""
+    """Writable directory for Postgres data hints and local caches."""
     if data := os.environ.get("LIBRELANE_DATA_DIR"):
         return Path(data).expanduser()
     root = _project_root()
@@ -36,9 +36,11 @@ SECRET_KEY = os.environ.get(
 )
 DEBUG = os.environ.get("DJANGO_DEBUG", "1") == "1"
 # Default "*" for dev so the server works on localhost and public/LAN IPs.
-# Override: DJANGO_ALLOWED_HOSTS=example.com,1.2.3.4
 _allowed = os.environ.get("DJANGO_ALLOWED_HOSTS", "*")
 ALLOWED_HOSTS = ["*"] if _allowed.strip() == "*" else [h.strip() for h in _allowed.split(",") if h.strip()]
+
+# Next.js UI origin. Django HTML page GETs redirect here; APIs stay on Django.
+NEXT_ORIGIN = os.environ.get("NEXT_ORIGIN", "http://127.0.0.1:3000").rstrip("/")
 
 INSTALLED_APPS = [
     "django.contrib.contenttypes",
@@ -50,7 +52,6 @@ MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.middleware.common.CommonMiddleware",
-    "django.middleware.csrf.CsrfViewMiddleware",
 ]
 
 ROOT_URLCONF = "librelane_web.urls"
@@ -58,8 +59,13 @@ WSGI_APPLICATION = "librelane_web.wsgi.application"
 
 DATABASES = {
     "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": DATA_DIR / "db.sqlite3",
+        "ENGINE": "django.db.backends.postgresql",
+        "HOST": os.environ.get("PGHOST", "127.0.0.1"),
+        "PORT": os.environ.get("PGPORT", "5432"),
+        "NAME": os.environ.get("PGDATABASE", "theapp"),
+        "USER": os.environ.get("PGUSER", "theapp"),
+        "PASSWORD": os.environ.get("PGPASSWORD", "theapp"),
+        "CONN_MAX_AGE": 60,
     }
 }
 
@@ -67,12 +73,15 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 STATIC_URL = "static/"
 STATIC_ROOT = PROJECT_ROOT / "frontend" / "staticfiles"
-STATICFILES_DIRS = [PROJECT_ROOT / "frontend" / "static"]
+STATICFILES_DIRS = []
+_legacy_static = PROJECT_ROOT / "frontend" / "static"
+if _legacy_static.is_dir():
+    STATICFILES_DIRS.append(_legacy_static)
 
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
-        "DIRS": [PROJECT_ROOT / "frontend" / "templates"],
+        "DIRS": [],
         "APP_DIRS": True,
         "OPTIONS": {
             "context_processors": [
@@ -91,7 +100,12 @@ USE_TZ = True
 LIBRELANE_DESIGN_NAME = "spm"
 LIBRELANE_PDK = os.environ.get("LIBRELANE_PDK", "sky130A")
 LIBRELANE_PDK_FAMILY = os.environ.get("LIBRELANE_PDK_FAMILY", "sky130")
+# Shared Ciel root for all supported PDK families (not user-configurable in the UI).
 PDK_ROOT = os.path.expanduser(os.environ.get("PDK_ROOT", "~/.ciel"))
+LIBRELANE_TEMP_ROOT = os.environ.get("LIBRELANE_TEMP_ROOT", "")
+
+# Flow artifacts can be large when persisted into Postgres.
+DATA_UPLOAD_MAX_MEMORY_SIZE = 64 * 1024 * 1024
 
 
 def ensure_data_dirs() -> None:

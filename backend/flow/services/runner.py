@@ -9,31 +9,56 @@ from contextlib import redirect_stderr, redirect_stdout
 import pickle
 from pathlib import Path
 
-from django.conf import settings
 from django.utils import timezone as dj_timezone
 
-from flow.models import FlowRun, FlowStepResult
+from flow.models import FlowRun, FlowStepResult, User
 from flow.services.setup import configure_interactive, pdk_is_ready
 from flow.services.step_output import format_step_output, format_step_summary_text
+from flow.services.verilog import require_top_module_verilog
+from flow.services.workdir import create_run_temp_dir, finalize_run_workspace
 from flow.steps import NOTEBOOK_STEPS, StepSpec
 
 
 class FlowRunner:
     def __init__(self, run: FlowRun) -> None:
         self.run = run
-        self.work_dir = Path(run.work_dir) if run.work_dir else self._prepare_work_dir()
-        self._state_file = self.work_dir / "librelane_state.pkl"
+        self.work_dir: Path | None = Path(run.work_dir) if run.work_dir else None
+        self._state_file: Path | None = (
+            self.work_dir / "librelane_state.pkl" if self.work_dir else None
+        )
         self._state = self._load_state()
 
+    def _owner_username(self) -> str:
+        try:
+            return self.run.owner_user.username
+        except User.DoesNotExist:
+            return "user"
+
+    def _ensure_work_dir(self) -> Path:
+        if self.work_dir is not None and self.work_dir.is_dir():
+            return self.work_dir
+        return self._prepare_work_dir()
+
     def _prepare_work_dir(self) -> Path:
-        base = settings.RUNS_DIR / f"run_{self.run.pk}"
-        base.mkdir(parents=True, exist_ok=True)
-        verilog_src = settings.DESIGNS_DIR / f"{self.run.design_name}.v"
-        verilog_dst = base / f"{self.run.design_name}.v"
-        if verilog_src.is_file():
-            shutil.copy2(verilog_src, verilog_dst)
+        if self.run.work_dir:
+            existing = Path(self.run.work_dir)
+            if existing.is_dir():
+                self.work_dir = existing
+                self._state_file = existing / "librelane_state.pkl"
+                return existing
+
+        base, folder_name = create_run_temp_dir(self._owner_username(), self.run.name)
+        designs = require_top_module_verilog(self.run.design_name)
+        shutil.copy2(designs, base / designs.name)
+
         self.run.work_dir = str(base)
-        self.run.save(update_fields=["work_dir", "updated_at"])
+        self.run.temp_folder_name = folder_name
+        self.run.artifacts_stored = False
+        self.run.save(
+            update_fields=["work_dir", "temp_folder_name", "artifacts_stored", "updated_at"]
+        )
+        self.work_dir = base
+        self._state_file = base / "librelane_state.pkl"
         return base
 
     def _save_setup_progress(self, log: io.StringIO, message: str = "") -> None:
@@ -51,25 +76,29 @@ class FlowRunner:
         self.run.save(update_fields=["status", "error_message", "updated_at"])
 
         try:
+            from django.conf import settings
             from flow.services.setup import check_tkinter
 
             self._save_setup_progress(log, f"LibreLane {self._version()}")
+            self._save_setup_progress(log, "Checking top module in Verilog…")
+            require_top_module_verilog(self.run.design_name)
             self._save_setup_progress(log, "Checking environment…")
             check_tkinter()
-            if pdk_is_ready(self.run.pdk_root, self.run.pdk_family):
+            pdk_root = self.run.pdk_root or settings.PDK_ROOT
+            if pdk_is_ready(pdk_root, self.run.pdk_family):
                 self._save_setup_progress(
                     log,
-                    f"PDK «{self.run.pdk_family}» already enabled under {self.run.pdk_root}.",
+                    f"PDK «{self.run.pdk_family}» already enabled under {pdk_root}.",
                 )
             else:
                 self._save_setup_progress(
                     log,
-                    "PDK is not ready yet. Run ./run.sh (or ./dev_run.sh) once and wait for "
-                    "“PDK ready” in the terminal before using Setup PDK here.",
+                    "PDKs are not ready yet. Run ./run.sh (or ./dev_run.sh) once and wait for "
+                    "“PDKs ready” in the terminal before using Setup PDK here.",
                 )
                 raise RuntimeError(
-                    "PDK not downloaded. Run ./run.sh and wait for the first-startup PDK "
-                    "download (~1 GB) to finish in the terminal."
+                    "PDKs not downloaded. Run ./run.sh and wait for the first-startup PDK "
+                    "download to finish in the terminal."
                 )
             self._save_setup_progress(log, "Configuring flow…")
             configure_interactive(
@@ -90,48 +119,62 @@ class FlowRunner:
             self.run.save()
 
     def run_all(self) -> None:
-        if self.run.status not in (FlowRun.Status.READY, FlowRun.Status.RUNNING):
-            self.setup()
+        try:
+            if self.run.status not in (FlowRun.Status.READY, FlowRun.Status.RUNNING):
+                self.setup()
 
-        self.run.status = FlowRun.Status.RUNNING
-        self.run.save(update_fields=["status", "updated_at"])
+            self.run.status = FlowRun.Status.RUNNING
+            self.run.save(update_fields=["status", "updated_at"])
 
-        for index, spec in enumerate(NOTEBOOK_STEPS):
-            step_row = self.run.steps.get(order=index)
-            if step_row.status == FlowStepResult.Status.DONE:
-                if self._state is None:
-                    self._state = self._load_state()
-                continue
-            self.run.current_step_index = index
-            self.run.save(update_fields=["current_step_index", "updated_at"])
-            self._run_single(step_row, spec)
+            for index, spec in enumerate(NOTEBOOK_STEPS):
+                step_row = self.run.steps.get(order=index)
+                if step_row.status == FlowStepResult.Status.DONE:
+                    if self._state is None:
+                        self._state = self._load_state()
+                    continue
+                self.run.current_step_index = index
+                self.run.save(update_fields=["current_step_index", "updated_at"])
+                self._run_single(step_row, spec)
 
-        self.run.status = FlowRun.Status.COMPLETED
-        self.run.save(update_fields=["status", "updated_at"])
+            self.run.status = FlowRun.Status.COMPLETED
+            self.run.save(update_fields=["status", "updated_at"])
+        finally:
+            self._finalize_if_terminal()
 
     def run_step(self, order: int) -> None:
-        if self.run.status == FlowRun.Status.PENDING:
-            self.setup()
+        try:
+            if self.run.status == FlowRun.Status.PENDING:
+                self.setup()
 
-        spec = NOTEBOOK_STEPS[order]
-        step_row = self.run.steps.get(order=order)
-        self.run.status = FlowRun.Status.RUNNING
-        self.run.current_step_index = order
-        self.run.save(update_fields=["status", "current_step_index", "updated_at"])
-        self._run_single(step_row, spec)
+            spec = NOTEBOOK_STEPS[order]
+            step_row = self.run.steps.get(order=order)
+            self.run.status = FlowRun.Status.RUNNING
+            self.run.current_step_index = order
+            self.run.save(update_fields=["status", "current_step_index", "updated_at"])
+            self._run_single(step_row, spec)
 
-        if all(
-            s.status in (FlowStepResult.Status.DONE, FlowStepResult.Status.SKIPPED)
-            for s in self.run.steps.all()
-        ):
-            self.run.status = FlowRun.Status.COMPLETED
-        else:
-            self.run.status = FlowRun.Status.READY
-        self.run.save(update_fields=["status", "updated_at"])
+            if all(
+                s.status in (FlowStepResult.Status.DONE, FlowStepResult.Status.SKIPPED)
+                for s in self.run.steps.all()
+            ):
+                self.run.status = FlowRun.Status.COMPLETED
+            else:
+                self.run.status = FlowRun.Status.READY
+            self.run.save(update_fields=["status", "updated_at"])
+        finally:
+            self._finalize_if_terminal()
+
+    def _finalize_if_terminal(self) -> None:
+        self.run.refresh_from_db()
+        if self.run.status in (FlowRun.Status.COMPLETED, FlowRun.Status.FAILED):
+            if not self.run.artifacts_stored and self.run.work_dir:
+                finalize_run_workspace(self.run)
 
     def _run_single(self, step_row: FlowStepResult, spec: StepSpec) -> None:
         from librelane.state import State
         from librelane.steps import Step
+
+        work_dir = self._ensure_work_dir()
 
         step_row.status = FlowStepResult.Status.RUNNING
         step_row.started_at = dj_timezone.now()
@@ -144,7 +187,7 @@ class FlowRunner:
             kwargs = dict(spec.kwargs)
 
             if spec.step_id == "Yosys.Synthesis":
-                verilog = self.work_dir / f"{self.run.design_name}.v"
+                verilog = work_dir / f"{self.run.design_name}.v"
                 kwargs["VERILOG_FILES"] = [str(verilog)]
                 kwargs["state_in"] = State()
             else:
@@ -156,7 +199,7 @@ class FlowRunner:
 
             from librelane.common.misc import slugify
 
-            step_dir = self.work_dir / f"{step_row.order + 1}-{slugify(spec.step_id)}"
+            step_dir = work_dir / f"{step_row.order + 1}-{slugify(spec.step_id)}"
 
             with redirect_stdout(log_capture), redirect_stderr(log_capture):
                 instance = step_cls(**kwargs)
@@ -164,7 +207,7 @@ class FlowRunner:
                 self._state = instance.state_out
                 self._save_state()
 
-            output = format_step_output(instance, work_dir=self.work_dir)
+            output = format_step_output(instance, work_dir=work_dir)
             step_row.status = FlowStepResult.Status.DONE
             step_row.output = output
             step_row.summary = format_step_summary_text(output)
@@ -198,7 +241,7 @@ class FlowRunner:
         )
 
     def _save_state(self) -> None:
-        if self._state is None:
+        if self._state is None or self._state_file is None:
             return
         try:
             with open(self._state_file, "wb") as f:

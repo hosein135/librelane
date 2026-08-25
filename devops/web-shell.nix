@@ -15,12 +15,23 @@ let
     ];
   });
 
+  # Upstream psycopg checkPhase needs a Postgres socket; skip checks like jadex_django.
+  psycopgNoCheck = pkgs.python3.pkgs.psycopg.overridePythonAttrs (_old: {
+    doCheck = false;
+    pythonImportsCheck = [
+      "psycopg"
+      "psycopg_c"
+    ];
+    nativeCheckInputs = [ ];
+  });
+
   webPython = pkgs.python3.withPackages (
     ps: with ps; [
       librelane
       django
       gunicorn
       whitenoise
+      psycopgNoCheck
     ]
   );
 
@@ -28,7 +39,6 @@ let
   webSitePackages = "${webPython}/${webPython.sitePackages}";
   toolsPath = lib.makeBinPath librelane.includedTools;
 
-  # Resolve repo root when the wrapper runs — never bake live source paths into /nix/store.
   resolveRoot = ''
     resolve_librelane_web_root() {
       if [ -n "''${LIBRELANE_WEB_ROOT:-}" ] && [ -f "''${LIBRELANE_WEB_ROOT}/backend/manage.py" ]; then
@@ -64,6 +74,13 @@ let
         export LIBRELANE_DATA_DIR="$HOME/.local/share/librelane-web"
       fi
     fi
+    export PGHOST="''${PGHOST:-127.0.0.1}"
+    export PGPORT="''${PGPORT:-5432}"
+    export PGUSER="''${PGUSER:-theapp}"
+    export PGPASSWORD="''${PGPASSWORD:-theapp}"
+    export PGDATABASE="''${PGDATABASE:-theapp}"
+    export NEXT_ORIGIN="''${NEXT_ORIGIN:-http://127.0.0.1:3000}"
+    export NEXT_TELEMETRY_DISABLED=1
     export PATH="${webPython}/bin:${toolsPath}:$PATH"
   '';
 
@@ -75,7 +92,7 @@ let
 
   web = pkgs.writeShellScriptBin "librelane-web" ''
     set -euo pipefail
-    export LIBRELANE_WEB_HOST="''${LIBRELANE_WEB_HOST:-0.0.0.0}"
+    export LIBRELANE_WEB_HOST="''${LIBRELANE_WEB_HOST:-127.0.0.1}"
     export LIBRELANE_WEB_PORT="''${LIBRELANE_WEB_PORT:-8000}"
     ${exportAppEnv}
     librelane-manage migrate --noinput
@@ -96,17 +113,25 @@ let
         graphviz
         iverilog
         coreutils
+        postgresql
+        nodejs_22
+        curl
+        gnumake
+        pkg-config
       ]);
 
     shellHook = ''
       ${exportAppEnv}
       export NIX_PYTHONPATH="${webSitePackages}"
       export PATH="${webPython}/bin:${lib.makeBinPath librelane.includedTools}:$PATH"
+      export PGDATA="''${PGDATA:-$LIBRELANE_DATA_DIR/pg}"
+      export LIBRELANE_NIX=1
       echo "LibreLane web shell - Python: $LIBRELANE_NIX_PYTHON"
       echo "  Repo root: $LIBRELANE_WEB_ROOT"
       echo "  Data dir: $LIBRELANE_DATA_DIR"
       echo "  librelane-manage - Django management"
-      echo "  librelane-web - Start http://127.0.0.1:8000/"
+      echo "  librelane-web - Start Django API on :8000"
+      echo "  Frontend: cd frontend && npm install && npm run dev  (or ./run.sh)"
     '';
   };
 in
