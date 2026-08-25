@@ -215,9 +215,8 @@ export function HomeClient({
       <section className="hero">
         <h1>LibreLane Colab, in your browser</h1>
         <p>
-          This web app mirrors <code>notebook.ipynb</code>: install LibreLane via Nix,
-          enable supported PDKs under <code>~/.ciel</code>, upload your Verilog design,
-          pick a top module, and run each implementation step (synthesis through LVS).
+          Upload Verilog, pick a top module, and walk the implementation flow — synthesis
+          through LVS — with a live step-by-step workspace.
         </p>
         <p className="meta">
           LibreLane version in environment:{" "}

@@ -115,6 +115,27 @@ function StepOutput({
   );
 }
 
+function StepMarker({ status, index }: { status: string; index: number }) {
+  if (status === "done") {
+    return (
+      <span className="progress-marker-icon" aria-hidden>
+        ✓
+      </span>
+    );
+  }
+  if (status === "failed") {
+    return (
+      <span className="progress-marker-icon" aria-hidden>
+        !
+      </span>
+    );
+  }
+  if (status === "running") {
+    return <span className="progress-spinner" aria-hidden />;
+  }
+  return <span>{index + 1}</span>;
+}
+
 export function RunDetailClient({
   username,
   runId,
@@ -129,6 +150,7 @@ export function RunDetailClient({
   const [error, setError] = useState<string | null>(null);
   const busyRef = useRef(false);
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const followRunning = useRef(true);
 
   const load = useCallback(async () => {
     const res = await apiFetch<FlowRun>(`/api/runs/${runId}`);
@@ -172,8 +194,13 @@ export function RunDetailClient({
   const steps = useMemo(() => run?.steps || [], [run]);
 
   useEffect(() => {
-    if (tab != null) return;
     if (!steps.length) return;
+    const running = steps.find((s) => s.status === "running");
+    if (running && followRunning.current) {
+      setTab(`step-${running.order}`);
+      return;
+    }
+    if (tab != null) return;
     const active =
       steps.find((s) => s.status === "running") ||
       steps.find((s) => s.status === "failed") ||
@@ -192,6 +219,7 @@ export function RunDetailClient({
       return;
     }
     busyRef.current = true;
+    followRunning.current = true;
     setError(null);
     const res = await apiFetch(path, { method: "POST" });
     if (!res.ok) {
@@ -204,134 +232,194 @@ export function RunDetailClient({
   }
 
   const activeTab = tab || (steps[0] ? `step-${steps[0].order}` : null);
+  const selectedStep = steps.find((s) => `step-${s.order}` === activeTab) || steps[0];
+
+  const reachedIndex = useMemo(() => {
+    let last = -1;
+    steps.forEach((s, i) => {
+      if (s.status === "done" || s.status === "running" || s.status === "failed") {
+        last = i;
+      }
+    });
+    return last;
+  }, [steps]);
+
+  const fillPct =
+    steps.length <= 1 ? 0 : Math.max(0, reachedIndex) / Math.max(1, steps.length - 1);
+
+  function selectStep(order: number) {
+    followRunning.current = false;
+    setTab(`step-${order}`);
+  }
+
+  const designLabel = run ? run.top_module_name || run.design_name : "";
 
   return (
-    <AppShell username={username} title={`Flow steps — Run #${runId}`}>
-      <section className="run-header">
-        <p className="meta">
-          <Link href={`/?id=${runId}`}>← Back to overview</Link>
-        </p>
-        <h1>
-          Flow steps — Run #{runId}
-          {run ? ` — ${run.top_module_name || run.design_name}` : ""}
-          {run?.name &&
-          run.name !== (run.top_module_name || run.design_name)
-            ? ` (${run.name})`
-            : ""}
-        </h1>
-        <p className={`status-pill status-${run?.status || "pending"}`}>
-          {(run?.status || "pending").replaceAll("_", " ")}
-        </p>
-        {run?.error_message ? <pre className="error">{run.error_message}</pre> : null}
-        {error ? <pre className="error">{error}</pre> : null}
-        <span className="meta">
-          {isRunning
-            ? run?.status === "setting_up"
-              ? "Configuring flow for this run…"
-              : "Step running…"
-            : run?.work_dir
-              ? `Workdir: ${run.work_dir}`
-              : run?.artifacts_stored
-                ? "Artifacts stored in Postgres (workdir may have been pruned)."
-                : ""}
-        </span>
-        {(run?.disk_bytes != null || run?.db_bytes != null) && (
-          <p className="meta">
-            Run size — disk: {formatBytes(run.disk_bytes)}, DB: {formatBytes(run.db_bytes)}
-          </p>
-        )}
-      </section>
+    <AppShell username={username} title={`Flow steps — Run #${runId}`} wide>
+      <div className="flow-page">
+        <section className="flow-toolbar">
+          <div className="flow-toolbar-copy">
+            <p className="meta">
+              <Link href={`/?id=${runId}`}>← Back to overview</Link>
+            </p>
+            <div className="flow-toolbar-title-row">
+              <h1>
+                Run #{runId}
+                {designLabel ? ` — ${designLabel}` : ""}
+                {run?.name && run.name !== designLabel ? ` (${run.name})` : ""}
+              </h1>
+              <p className={`status-pill status-${run?.status || "pending"}`}>
+                {(run?.status || "pending").replaceAll("_", " ")}
+              </p>
+            </div>
+            {run?.error_message ? <pre className="error">{run.error_message}</pre> : null}
+            {error ? <pre className="error">{error}</pre> : null}
+            <p className="meta flow-toolbar-meta">
+              {isRunning
+                ? run?.status === "setting_up"
+                  ? "Configuring flow for this run…"
+                  : "Step running…"
+                : run?.work_dir
+                  ? `Workdir: ${run.work_dir}`
+                  : run?.artifacts_stored
+                    ? "Artifacts stored in Postgres (workdir may have been pruned)."
+                    : "Select a step to inspect results, or run the full flow."}
+              {(run?.disk_bytes != null || run?.db_bytes != null) && (
+                <>
+                  {" "}
+                  · Disk {formatBytes(run.disk_bytes)}, DB {formatBytes(run.db_bytes)}
+                </>
+              )}
+            </p>
+          </div>
+          <button
+            type="button"
+            className="btn primary btn-run-all"
+            disabled={isRunning || !steps.length}
+            onClick={() => void startAction(`/api/runs/${runId}/run-all`)}
+          >
+            {isRunning ? "Running…" : "Run all steps"}
+          </button>
+        </section>
 
-      <div className="tabs panel">
-        <nav className="tab-list" role="tablist" aria-label="Flow steps">
-          {steps.map((s) => (
-            <button
-              key={s.order}
-              type="button"
-              className={`tab-btn tab-btn-step status-${s.status}${
-                activeTab === `step-${s.order}` ? " active" : ""
-              }`}
-              onClick={() => setTab(`step-${s.order}`)}
-              title={s.step_id}
-            >
-              {s.title}
-            </button>
-          ))}
-        </nav>
+        <div className="flow-workspace">
+          <nav className="flow-progress" aria-label="Flow steps">
+            <div className="progress-list-wrap">
+              {steps.length > 1 ? (
+                <>
+                  <div className="progress-track" />
+                  <div
+                    className="progress-track-fill"
+                    style={{ height: `calc(${fillPct} * (100% - 2rem))` }}
+                  />
+                </>
+              ) : null}
+              <ol className="progress-list">
+                {!steps.length ? (
+                  <li className="meta">Loading steps…</li>
+                ) : (
+                  steps.map((s, i) => {
+                    const active = activeTab === `step-${s.order}`;
+                    return (
+                      <li key={s.order}>
+                        <button
+                          type="button"
+                          className={`progress-step status-${s.status}${active ? " active" : ""}`}
+                          onClick={() => selectStep(s.order)}
+                          title={s.step_id}
+                        >
+                          <span className={`progress-marker status-${s.status}`}>
+                            <StepMarker status={s.status} index={i} />
+                          </span>
+                          <span className="progress-step-copy">
+                            <span className="progress-step-title">{s.title}</span>
+                            <span className="progress-step-status">
+                              {STATUS_LABELS[s.status] || s.status}
+                            </span>
+                          </span>
+                        </button>
+                      </li>
+                    );
+                  })
+                )}
+              </ol>
+            </div>
+          </nav>
 
-        <div className="tab-content">
-          {!steps.length ? (
-            <p className="meta">Loading steps…</p>
-          ) : (
-            steps.map((step) => (
-              <section
-                key={step.order}
-                className={`tab-panel${activeTab === `step-${step.order}` ? " active" : ""}`}
-                hidden={activeTab !== `step-${step.order}`}
-              >
-                <article className={`step-card status-${step.status}`}>
-                  <header className="step-header">
-                    <h2>{step.title}</h2>
-                    <code>{step.step_id}</code>
-                    <span className={`status-pill status-${step.status}`}>
-                      {STATUS_LABELS[step.status] || step.status}
-                    </span>
-                  </header>
-                  <p className="step-desc">{step.description}</p>
+          <div className="flow-detail">
+            {!selectedStep ? (
+              <p className="meta">Loading steps…</p>
+            ) : (
+              <article className={`step-card status-${selectedStep.status}`}>
+                <header className="step-header">
+                  <h2>{selectedStep.title}</h2>
+                  <code>{selectedStep.step_id}</code>
+                  <span className={`status-pill status-${selectedStep.status}`}>
+                    {STATUS_LABELS[selectedStep.status] || selectedStep.status}
+                  </span>
+                </header>
+                <p className="step-desc">{selectedStep.description}</p>
+                <div className="step-actions">
                   <button
                     type="button"
                     className="btn primary"
                     disabled={isRunning}
                     onClick={() =>
-                      void startAction(`/api/runs/${runId}/steps/${step.order}/run`)
+                      void startAction(`/api/runs/${runId}/steps/${selectedStep.order}/run`)
                     }
                   >
-                    Run {step.title}
+                    Run this step
                   </button>
-                  {step.log ? (
-                    <div className="step-log-wrap">
-                      <h3>Log</h3>
-                      <pre className="log step-log">{step.log}</pre>
-                    </div>
+                </div>
+                <div className="step-downloads">
+                  {selectedStep.can_download_zip ? (
+                    <a
+                      className="btn"
+                      href={`/runs/${runId}/steps/${selectedStep.order}/outputs.zip`}
+                      download
+                    >
+                      Download all outputs (.zip)
+                    </a>
                   ) : null}
-                  <div className="step-downloads">
-                    {step.can_download_zip ? (
-                      <a
-                        className="btn"
-                        href={`/runs/${runId}/steps/${step.order}/outputs.zip`}
-                        download
-                      >
-                        Download all outputs (.zip)
-                      </a>
-                    ) : null}
-                    {step.can_download_svg ? (
-                      <a
-                        className="btn"
-                        href={`/runs/${runId}/steps/${step.order}/preview.svg?download=1`}
-                        download
-                      >
-                        Download preview (.svg)
-                      </a>
-                    ) : null}
-                    {step.can_download_preview_source ? (
-                      <a
-                        className="btn"
-                        href={`/runs/${runId}/steps/${step.order}/preview-source`}
-                        download
-                      >
-                        Download layout source
-                        {step.preview_source_name ? ` (${step.preview_source_name})` : ""}
-                      </a>
-                    ) : null}
+                  {selectedStep.can_download_svg ? (
+                    <a
+                      className="btn"
+                      href={`/runs/${runId}/steps/${selectedStep.order}/preview.svg?download=1`}
+                      download
+                    >
+                      Download preview (.svg)
+                    </a>
+                  ) : null}
+                  {selectedStep.can_download_preview_source ? (
+                    <a
+                      className="btn"
+                      href={`/runs/${runId}/steps/${selectedStep.order}/preview-source`}
+                      download
+                    >
+                      Download layout source
+                      {selectedStep.preview_source_name
+                        ? ` (${selectedStep.preview_source_name})`
+                        : ""}
+                    </a>
+                  ) : null}
+                </div>
+                {selectedStep.log ? (
+                  <div className="step-log-wrap">
+                    <h3>Log</h3>
+                    <pre className="log step-log">{selectedStep.log}</pre>
                   </div>
-                  <div className="step-summary-wrap">
-                    <h3>Results</h3>
-                    <StepOutput runId={runId} step={step} />
-                  </div>
-                </article>
-              </section>
-            ))
-          )}
+                ) : null}
+                <div className="step-summary-wrap">
+                  <h3>Results</h3>
+                  {hasOutputContent(selectedStep.output) || selectedStep.summary ? (
+                    <StepOutput runId={runId} step={selectedStep} />
+                  ) : (
+                    <p className="meta">No results yet. Run this step or run all steps.</p>
+                  )}
+                </div>
+              </article>
+            )}
+          </div>
         </div>
       </div>
     </AppShell>

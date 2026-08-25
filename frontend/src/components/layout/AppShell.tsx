@@ -4,10 +4,12 @@ import { ReactNode } from "react";
 export function AppShell({
   title,
   username,
+  wide,
   children,
 }: {
   title?: string;
   username?: string;
+  wide?: boolean;
   children: ReactNode;
 }) {
   return (
@@ -19,7 +21,7 @@ export function AppShell({
         <span className="tagline">
           {title || "Colab notebook flow — sky130 SPM design"}
         </span>
-        <span style={{ marginLeft: "auto", display: "flex", gap: "0.75rem", alignItems: "center" }}>
+        <span className="header-actions">
           {username ? <span className="meta">{username}</span> : null}
           {username ? (
             <a href="/logout" className="btn">
@@ -37,7 +39,7 @@ export function AppShell({
           )}
         </span>
       </header>
-      <main className="container">{children}</main>
+      <main className={wide ? "container container-wide" : "container"}>{children}</main>
     </>
   );
 }
