@@ -29,6 +29,8 @@ PROJECT_ROOT = _project_root()
 DESIGNS_DIR = PROJECT_ROOT / "designs"
 DATA_DIR = _data_dir()
 RUNS_DIR = DATA_DIR
+# Per-user/per-run LibreLane workspaces live here (not OS /tmp).
+RUNS_ROOT = DATA_DIR / "runs"
 
 SECRET_KEY = os.environ.get(
     "DJANGO_SECRET_KEY",
@@ -102,7 +104,23 @@ LIBRELANE_PDK = os.environ.get("LIBRELANE_PDK", "sky130A")
 LIBRELANE_PDK_FAMILY = os.environ.get("LIBRELANE_PDK_FAMILY", "sky130")
 # Shared Ciel root for all supported PDK families (not user-configurable in the UI).
 PDK_ROOT = os.path.expanduser(os.environ.get("PDK_ROOT", "~/.ciel"))
+# Optional override for run workspaces; default is DATA_DIR/runs.
 LIBRELANE_TEMP_ROOT = os.environ.get("LIBRELANE_TEMP_ROOT", "")
+
+# Storage policy (disk workdirs + Postgres artifacts).
+STORAGE_USER_QUOTA_BYTES = int(
+    os.environ.get("LIBRELANE_USER_QUOTA_BYTES", str(20 * 1024**3))
+)
+STORAGE_RUN_BUDGET_BYTES = int(
+    os.environ.get("LIBRELANE_RUN_BUDGET_BYTES", str(10 * 1024**3))
+)
+STORAGE_MIN_FREE_BYTES = int(
+    os.environ.get("LIBRELANE_MIN_FREE_BYTES", str(5 * 1024**3))
+)
+# 0 = keep workdirs until the user deletes the run.
+STORAGE_WORKDIR_RETENTION_DAYS = int(
+    os.environ.get("LIBRELANE_WORKDIR_RETENTION_DAYS", "0")
+)
 
 # Flow artifacts can be large when persisted into Postgres.
 DATA_UPLOAD_MAX_MEMORY_SIZE = 64 * 1024 * 1024
@@ -110,3 +128,4 @@ DATA_UPLOAD_MAX_MEMORY_SIZE = 64 * 1024 * 1024
 
 def ensure_data_dirs() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    RUNS_ROOT.mkdir(parents=True, exist_ok=True)

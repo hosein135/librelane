@@ -46,12 +46,16 @@ CREATE TABLE IF NOT EXISTS flow_runs (
     current_step_index integer NOT NULL DEFAULT -1,
     error_message text NOT NULL DEFAULT '',
     setup_log text NOT NULL DEFAULT '',
-    artifacts_stored boolean NOT NULL DEFAULT false
+    artifacts_stored boolean NOT NULL DEFAULT false,
+    disk_bytes bigint NOT NULL DEFAULT 0,
+    db_bytes bigint NOT NULL DEFAULT 0
 );
 
 ALTER TABLE flow_runs ADD COLUMN IF NOT EXISTS name varchar(256) NOT NULL DEFAULT 'spm';
 ALTER TABLE flow_runs ADD COLUMN IF NOT EXISTS temp_folder_name varchar(512) NOT NULL DEFAULT '';
 ALTER TABLE flow_runs ADD COLUMN IF NOT EXISTS artifacts_stored boolean NOT NULL DEFAULT false;
+ALTER TABLE flow_runs ADD COLUMN IF NOT EXISTS disk_bytes bigint NOT NULL DEFAULT 0;
+ALTER TABLE flow_runs ADD COLUMN IF NOT EXISTS db_bytes bigint NOT NULL DEFAULT 0;
 
 CREATE INDEX IF NOT EXISTS flow_runs_owner_status_idx
     ON flow_runs (owner_user_id, status);
@@ -75,7 +79,7 @@ ALTER TABLE flow_step_results ADD COLUMN IF NOT EXISTS output jsonb NOT NULL DEF
 
 CREATE INDEX IF NOT EXISTS flow_step_results_run_idx ON flow_step_results (run_id);
 
--- Persisted run artifacts (temp work dir is removed after a finished flow).
+-- Persisted run artifacts (BYTEA). On-disk workdirs live under DATA_DIR/runs/.
 CREATE TABLE IF NOT EXISTS flow_run_files (
     id bigserial PRIMARY KEY,
     run_id bigint NOT NULL REFERENCES flow_runs (id) ON DELETE CASCADE,

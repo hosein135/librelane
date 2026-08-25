@@ -34,11 +34,16 @@ def _slugify_step_id(step_id: str) -> str:
 
 
 def work_dir_for_run(run: FlowRun) -> Path | None:
+    from flow.services.workdir import resolve_run_workdir
+
+    resolved = resolve_run_workdir(run)
+    if resolved is not None:
+        return resolved
     if run.work_dir:
         candidate = Path(run.work_dir).expanduser()
         if candidate.is_dir():
             return candidate.resolve()
-    fallback = Path(settings.RUNS_DIR) / f"run_{run.pk}"
+    fallback = Path(settings.RUNS_DIR) / "runs" / f"user_{run.owner_user_id}" / f"run_{run.pk}"
     if fallback.is_dir():
         return fallback.resolve()
     return None

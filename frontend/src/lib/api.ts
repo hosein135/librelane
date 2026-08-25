@@ -23,6 +23,19 @@ export type FlowStep = {
   description?: string;
 };
 
+export type StorageInfo = {
+  user_disk_bytes: number;
+  user_db_bytes: number;
+  user_total_bytes: number;
+  user_quota_bytes: number;
+  run_budget_bytes: number;
+  min_free_bytes: number;
+  free_bytes: number;
+  retention_days: number;
+  runs_root: string;
+  user_used_pct: number;
+};
+
 export type FlowRun = {
   id: number;
   name: string;
@@ -39,6 +52,8 @@ export type FlowRun = {
   error_message: string;
   setup_log: string;
   artifacts_stored: boolean;
+  disk_bytes?: number;
+  db_bytes?: number;
   created_at: string | null;
   updated_at: string | null;
   is_running: boolean;
@@ -52,6 +67,7 @@ export type HomePayload = {
   librelane_version: string;
   default_pdk: string;
   pdk_variants: string[];
+  storage?: StorageInfo;
   step_catalog: StepCatalogItem[];
   busy: boolean;
   runs: FlowRun[];

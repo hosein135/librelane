@@ -5,6 +5,18 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AppShell } from "@/components/layout/AppShell";
 import { apiFetch, type FlowRun, type FlowStep } from "@/lib/api";
 
+function formatBytes(bytes: number | undefined | null): string {
+  if (bytes == null || Number.isNaN(Number(bytes))) return "0 B";
+  let n = Number(bytes);
+  for (const unit of ["B", "KB", "MB", "GB", "TB"]) {
+    if (n < 1024 || unit === "TB") {
+      return unit === "B" ? `${Math.round(n)} ${unit}` : `${n.toFixed(1)} ${unit}`;
+    }
+    n /= 1024;
+  }
+  return `${bytes} B`;
+}
+
 const STATUS_LABELS: Record<string, string> = {
   pending: "Pending",
   running: "Running",
@@ -229,12 +241,17 @@ export function RunDetailClient({
             ? run?.status === "setting_up"
               ? "Configuring flow for this run…"
               : "Step running…"
-            : run?.temp_folder_name
-              ? `Temp folder: ${run.temp_folder_name}`
+            : run?.work_dir
+              ? `Workdir: ${run.work_dir}`
               : run?.artifacts_stored
-                ? "Artifacts stored in Postgres (work folder kept on disk)."
+                ? "Artifacts stored in Postgres (workdir may have been pruned)."
                 : ""}
         </span>
+        {(run?.disk_bytes != null || run?.db_bytes != null) && (
+          <p className="meta">
+            Run size — disk: {formatBytes(run.disk_bytes)}, DB: {formatBytes(run.db_bytes)}
+          </p>
+        )}
       </section>
 
       <div className="tabs panel">

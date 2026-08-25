@@ -44,6 +44,12 @@ from flow.services.downloads import (
 from flow.services.runner import FlowRunner
 from flow.services.setup import librelane_version
 from flow.services.step_output import output_has_content
+from flow.services.storage import (
+    StorageLimitError,
+    assert_can_start_run,
+    prune_expired_workdirs,
+    storage_snapshot,
+)
 from flow.services.verilog import require_top_module_verilog, verilog_path_for
 from flow.services.workdir import remove_run_temp
 from flow.steps import NOTEBOOK_STEPS
@@ -178,6 +184,8 @@ def _run_to_dict(run: FlowRun, *, include_steps: bool = False) -> dict:
         "error_message": run.error_message,
         "setup_log": run.setup_log,
         "artifacts_stored": run.artifacts_stored,
+        "disk_bytes": int(getattr(run, "disk_bytes", 0) or 0),
+        "db_bytes": int(getattr(run, "db_bytes", 0) or 0),
         "created_at": run.created_at.isoformat() if run.created_at else None,
         "updated_at": run.updated_at.isoformat() if run.updated_at else None,
         "is_running": _is_active(run.pk),
@@ -351,12 +359,18 @@ def api_home(request: HttpRequest) -> JsonResponse:
         version = "unknown (enter nix develop first)"
 
     busy = _user_has_active_run(user)
+    try:
+        prune_expired_workdirs()
+    except Exception:
+        pass
+    storage = storage_snapshot(user)
     return JsonResponse(
         {
             "username": username,
             "librelane_version": version,
             "default_pdk": settings.LIBRELANE_PDK,
             "pdk_variants": SUPPORTED_PDK_VARIANT_LIST,
+            "storage": storage.as_dict(),
             "step_catalog": [
                 {"step_id": s.step_id, "title": s.title, "description": s.description}
                 for s in NOTEBOOK_STEPS
@@ -407,6 +421,11 @@ def create_run(request: HttpRequest) -> HttpResponse:
         pdk_family = family_for_variant(pdk)
     except ValueError as exc:
         return JsonResponse({"error": str(exc)}, status=400)
+
+    try:
+        assert_can_start_run(user)
+    except StorageLimitError as exc:
+        return JsonResponse({"error": str(exc)}, status=507)
 
     run_name = str(data.get("name") or top_module)
     run = FlowRun.objects.create(

@@ -15,6 +15,18 @@ function overviewHref(runId: number): string {
   return `/?id=${runId}`;
 }
 
+function formatBytes(bytes: number | undefined | null): string {
+  if (bytes == null || Number.isNaN(Number(bytes))) return "0 B";
+  let n = Number(bytes);
+  for (const unit of ["B", "KB", "MB", "GB", "TB"]) {
+    if (n < 1024 || unit === "TB") {
+      return unit === "B" ? `${Math.round(n)} ${unit}` : `${n.toFixed(1)} ${unit}`;
+    }
+    n /= 1024;
+  }
+  return `${bytes} B`;
+}
+
 export function HomeClient({
   username,
   selectedRunId,
@@ -220,6 +232,39 @@ export function HomeClient({
         ) : null}
       </section>
 
+      {data?.storage ? (
+        <section className="panel">
+          <h2>Storage</h2>
+          <p className="meta">
+            Workspaces: <code>{data.storage.runs_root}/user_&lt;id&gt;/run_&lt;id&gt;/</code>
+          </p>
+          <ul className="config-list">
+            <li>
+              Your usage: <code>{formatBytes(data.storage.user_total_bytes)}</code> of{" "}
+              <code>{formatBytes(data.storage.user_quota_bytes)}</code> (
+              {data.storage.user_used_pct}%) — disk{" "}
+              <code>{formatBytes(data.storage.user_disk_bytes)}</code>, DB{" "}
+              <code>{formatBytes(data.storage.user_db_bytes)}</code>
+            </li>
+            <li>
+              Free on volume: <code>{formatBytes(data.storage.free_bytes)}</code> (min{" "}
+              <code>{formatBytes(data.storage.min_free_bytes)}</code>)
+            </li>
+            <li>
+              Per-run disk budget: <code>{formatBytes(data.storage.run_budget_bytes)}</code>
+            </li>
+            <li>
+              Workdir retention:{" "}
+              <code>
+                {data.storage.retention_days > 0
+                  ? `${data.storage.retention_days} days after finish (DB archive kept)`
+                  : "until you delete the run"}
+              </code>
+            </li>
+          </ul>
+        </section>
+      ) : null}
+
       <section className="panel">
         <h2>Start a new run</h2>
         <form onSubmit={onCreate}>
@@ -383,12 +428,18 @@ export function HomeClient({
                 ? selectedRun?.status === "setting_up"
                   ? "Configuring flow for this run…"
                   : "Step running…"
-                : selectedRun?.temp_folder_name
-                  ? `Temp folder: ${selectedRun.temp_folder_name}`
+                : selectedRun?.work_dir
+                  ? `Workdir: ${selectedRun.work_dir}`
                   : selectedRun?.artifacts_stored
-                    ? "Artifacts stored in Postgres (work folder kept on disk)."
+                    ? "Artifacts stored in Postgres (workdir may have been pruned)."
                     : ""}
             </p>
+            {(selectedRun?.disk_bytes != null || selectedRun?.db_bytes != null) && (
+              <p className="meta">
+                Run size — disk: <code>{formatBytes(selectedRun.disk_bytes)}</code>, DB:{" "}
+                <code>{formatBytes(selectedRun.db_bytes)}</code>
+              </p>
+            )}
             <div className="actions">
               <Link href={stepsHref(selectedRunId)} className="btn primary">
                 Open flow steps
@@ -445,12 +496,14 @@ export function HomeClient({
                 Clock period: <code>{selectedRun?.clock_period}</code> ns
               </li>
               <li>
-                Temp folder:{" "}
-                <code>{selectedRun?.temp_folder_name || "(created when the flow starts)"}</code>
+                Workdir:{" "}
+                <code>{selectedRun?.work_dir || "(created when the flow starts)"}</code>
               </li>
               <li>
-                Work directory:{" "}
-                <code>{selectedRun?.work_dir || "(created on first step)"}</code>
+                Disk / DB:{" "}
+                <code>
+                  {formatBytes(selectedRun?.disk_bytes)} / {formatBytes(selectedRun?.db_bytes)}
+                </code>
               </li>
             </ul>
           </section>

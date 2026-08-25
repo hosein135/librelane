@@ -14,8 +14,9 @@ from django.utils import timezone as dj_timezone
 from flow.models import FlowRun, FlowStepResult, User
 from flow.services.setup import configure_interactive, pdk_is_ready
 from flow.services.step_output import format_step_output, format_step_summary_text
+from flow.services.storage import StorageLimitError, assert_can_continue_run
 from flow.services.verilog import require_top_module_verilog
-from flow.services.workdir import create_run_temp_dir, finalize_run_workspace
+from flow.services.workdir import create_run_workdir, finalize_run_workspace, measure_and_save_run_sizes
 from flow.steps import NOTEBOOK_STEPS, StepSpec
 
 
@@ -47,12 +48,13 @@ class FlowRunner:
                 self._state_file = existing / "librelane_state.pkl"
                 return existing
 
-        base, folder_name = create_run_temp_dir(self._owner_username(), self.run.name)
+        assert_can_continue_run(self.run)
+        base, folder_key = create_run_workdir(self.run)
         designs = require_top_module_verilog(self.run.design_name)
         shutil.copy2(designs, base / designs.name)
 
         self.run.work_dir = str(base)
-        self.run.temp_folder_name = folder_name
+        self.run.temp_folder_name = folder_key
         self.run.artifacts_stored = False
         self.run.save(
             update_fields=["work_dir", "temp_folder_name", "artifacts_stored", "updated_at"]
@@ -80,6 +82,8 @@ class FlowRunner:
             from flow.services.setup import check_tkinter
 
             self._save_setup_progress(log, f"LibreLane {self._version()}")
+            self._save_setup_progress(log, "Checking storage limits…")
+            assert_can_continue_run(self.run)
             self._save_setup_progress(log, "Checking top module in Verilog…")
             require_top_module_verilog(self.run.design_name)
             self._save_setup_progress(log, "Checking environment…")
@@ -174,6 +178,7 @@ class FlowRunner:
         from librelane.state import State
         from librelane.steps import Step
 
+        assert_can_continue_run(self.run)
         work_dir = self._ensure_work_dir()
 
         step_row.status = FlowStepResult.Status.RUNNING
@@ -212,6 +217,16 @@ class FlowRunner:
             step_row.output = output
             step_row.summary = format_step_summary_text(output)
             step_row.log = log_capture.getvalue()
+            measure_and_save_run_sizes(self.run)
+        except StorageLimitError as exc:
+            step_row.status = FlowStepResult.Status.FAILED
+            step_row.log = log_capture.getvalue() + "\n" + str(exc)
+            step_row.summary = str(exc)
+            step_row.output = {"error": str(exc)}
+            self.run.status = FlowRun.Status.FAILED
+            self.run.error_message = str(exc)
+            self.run.save(update_fields=["status", "error_message", "updated_at"])
+            raise
         except Exception as exc:
             step_row.status = FlowStepResult.Status.FAILED
             step_row.log = log_capture.getvalue() + "\n" + traceback.format_exc()

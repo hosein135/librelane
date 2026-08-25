@@ -73,7 +73,9 @@ CREATE TABLE flow_runs (
     current_step_index integer NOT NULL DEFAULT -1,
     error_message text NOT NULL DEFAULT '',
     setup_log text NOT NULL DEFAULT '',
-    artifacts_stored boolean NOT NULL DEFAULT false
+    artifacts_stored boolean NOT NULL DEFAULT false,
+    disk_bytes bigint NOT NULL DEFAULT 0,
+    db_bytes bigint NOT NULL DEFAULT 0
 );
 
 CREATE INDEX flow_runs_owner_status_idx ON flow_runs (owner_user_id, status);

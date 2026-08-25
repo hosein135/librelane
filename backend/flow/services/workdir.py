@@ -1,94 +1,139 @@
-"""Temporary long-named work folders for LibreLane runs."""
+"""Per-user / per-run workdirs under the project data directory."""
 
 from __future__ import annotations
 
 import mimetypes
-import re
 import shutil
-import tempfile
-from datetime import datetime, timezone
 from pathlib import Path
 
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Sum
 
 from flow.models import FlowRun, FlowRunFile
 
-_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
-
-def format_dir_timestamp_utc() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-
-
-def safe_fs_token(value: str, *, max_len: int = 80) -> str:
-    cleaned = _SAFE_RE.sub("_", (value or "").strip().replace("/", "_").replace("\\", "_"))
-    cleaned = cleaned.strip("._") or "run"
-    return cleaned[:max_len]
-
-
-def os_temp_root() -> Path:
-    override = getattr(settings, "LIBRELANE_TEMP_ROOT", None)
-    if override:
+def runs_root() -> Path:
+    """Controlled root for all run workspaces (not /tmp)."""
+    override = getattr(settings, "LIBRELANE_TEMP_ROOT", None) or ""
+    if str(override).strip():
         root = Path(override).expanduser()
-        root.mkdir(parents=True, exist_ok=True)
-        return root
-    root = Path(tempfile.gettempdir()) / "librelane_runs"
+    else:
+        root = Path(settings.RUNS_ROOT)
     root.mkdir(parents=True, exist_ok=True)
-    return root
+    return root.resolve()
 
 
-def build_temp_folder_name(username: str, run_name: str) -> str:
-    return (
-        f"{safe_fs_token(username)}_"
-        f"{safe_fs_token(run_name)}_"
-        f"{format_dir_timestamp_utc()}"
-    )
-
-
-def create_run_temp_dir(username: str, run_name: str) -> tuple[Path, str]:
-    folder_name = build_temp_folder_name(username, run_name)
-    path = os_temp_root() / folder_name
-    path.mkdir(parents=True, exist_ok=False)
-    return path, folder_name
-
-
-def resolve_temp_dir(folder_name: str) -> Path | None:
-    if not folder_name:
-        return None
-    if ".." in folder_name or "/" in folder_name or "\\" in folder_name:
-        return None
-    path = (os_temp_root() / folder_name).resolve()
-    try:
-        path.relative_to(os_temp_root().resolve())
-    except ValueError:
-        return None
+def user_runs_dir(user_id: int) -> Path:
+    path = runs_root() / f"user_{int(user_id)}"
+    path.mkdir(parents=True, exist_ok=True)
     return path
 
 
-def remove_temp_dir(folder_name: str) -> None:
-    path = resolve_temp_dir(folder_name)
-    if path is None:
-        return
-    if path.exists():
-        shutil.rmtree(path, ignore_errors=True)
+def run_workdir_path(user_id: int, run_id: int) -> Path:
+    return user_runs_dir(user_id) / f"run_{int(run_id)}"
 
 
-def remove_run_temp(run: FlowRun) -> None:
-    if run.temp_folder_name:
-        remove_temp_dir(run.temp_folder_name)
+def relative_workdir_key(user_id: int, run_id: int) -> str:
+    return f"user_{int(user_id)}/run_{int(run_id)}"
+
+
+def create_run_workdir(run: FlowRun) -> tuple[Path, str]:
+    """
+    Create ``$RUNS_ROOT/user_<uid>/run_<rid>/`` for this run.
+
+    Returns (absolute path, relative key stored in temp_folder_name).
+    """
+    if not run.pk or not run.owner_user_id:
+        raise ValueError("Run must be saved with an owner before creating a workdir.")
+    path = run_workdir_path(run.owner_user_id, run.pk)
+    path.mkdir(parents=True, exist_ok=True)
+    key = relative_workdir_key(run.owner_user_id, run.pk)
+    return path, key
+
+
+def resolve_run_workdir(run: FlowRun) -> Path | None:
+    """Resolve the on-disk workdir for a run if it exists and is under runs_root."""
+    root = runs_root()
+    candidates: list[Path] = []
     if run.work_dir:
-        work = Path(run.work_dir)
-        root = os_temp_root().resolve()
+        candidates.append(Path(run.work_dir).expanduser())
+    if run.owner_user_id and run.pk:
+        candidates.append(run_workdir_path(run.owner_user_id, run.pk))
+    if run.temp_folder_name and "/" in run.temp_folder_name and ".." not in run.temp_folder_name:
+        candidates.append(root / run.temp_folder_name)
+
+    for candidate in candidates:
         try:
-            resolved = work.resolve()
-            if resolved.exists() and str(resolved).startswith(str(root)):
-                shutil.rmtree(resolved, ignore_errors=True)
-        except OSError:
-            pass
+            resolved = candidate.resolve()
+            resolved.relative_to(root)
+        except (OSError, ValueError):
+            continue
+        if resolved.is_dir():
+            return resolved
+    return None
+
+
+def directory_size_bytes(path: Path) -> int:
+    if not path.is_dir():
+        return 0
+    total = 0
+    for child in path.rglob("*"):
+        if child.is_file():
+            try:
+                total += child.stat().st_size
+            except OSError:
+                continue
+    return total
+
+
+def measure_and_save_run_sizes(run: FlowRun) -> dict[str, int]:
+    """Update disk_bytes / db_bytes on the run from disk + Postgres."""
+    disk = 0
+    work = resolve_run_workdir(run)
+    if work is not None:
+        disk = directory_size_bytes(work)
+    db_agg = FlowRunFile.objects.filter(run=run).aggregate(total=Sum("size_bytes"))
+    db = int(db_agg["total"] or 0)
+    run.disk_bytes = disk
+    run.db_bytes = db
+    run.save(update_fields=["disk_bytes", "db_bytes", "updated_at"])
+    return {"disk_bytes": disk, "db_bytes": db}
+
+
+def remove_run_workdir(run: FlowRun) -> None:
+    """Delete the on-disk worktree for this run (safe path check)."""
+    root = runs_root()
+    targets: list[Path] = []
+    if run.owner_user_id and run.pk:
+        targets.append(run_workdir_path(run.owner_user_id, run.pk))
+    if run.work_dir:
+        targets.append(Path(run.work_dir).expanduser())
+    if run.temp_folder_name and "/" in run.temp_folder_name and ".." not in run.temp_folder_name:
+        targets.append(root / run.temp_folder_name)
+
+    seen: set[Path] = set()
+    for target in targets:
+        try:
+            resolved = target.resolve()
+            resolved.relative_to(root)
+        except (OSError, ValueError):
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if resolved.exists():
+            shutil.rmtree(resolved, ignore_errors=True)
+
     run.work_dir = ""
     run.temp_folder_name = ""
-    run.save(update_fields=["work_dir", "temp_folder_name", "updated_at"])
+    run.disk_bytes = 0
+    run.save(update_fields=["work_dir", "temp_folder_name", "disk_bytes", "updated_at"])
+
+
+# Back-compat name used by views.delete_run
+def remove_run_temp(run: FlowRun) -> None:
+    remove_run_workdir(run)
 
 
 def _guess_content_type(path: Path) -> str:
@@ -104,10 +149,8 @@ def store_run_files_in_db(run: FlowRun) -> int:
     empty rows with content_type ``inode/directory`` so the folder layout is
     reconstructible even when a directory has no files.
     """
-    if not run.work_dir:
-        return 0
-    work = Path(run.work_dir)
-    if not work.is_dir():
+    work = resolve_run_workdir(run)
+    if work is None:
         return 0
 
     stored = 0
@@ -160,18 +203,18 @@ def store_run_files_in_db(run: FlowRun) -> int:
             FlowRunFile.objects.bulk_create(rows, batch_size=50)
         run.artifacts_stored = True
         run.save(update_fields=["artifacts_stored", "updated_at"])
+    measure_and_save_run_sizes(run)
     return stored
 
 
 def finalize_run_workspace(run: FlowRun) -> None:
     """
-    Persist generated files/folders into Postgres.
+    Persist generated files/folders into Postgres and refresh size counters.
 
-    The on-disk work folder is kept (no automatic deletion). Explicit run
-    deletion still removes both DB rows and the work folder.
+    The on-disk work folder is kept (no automatic deletion on finish).
+    Retention pruning may remove old workdirs later if configured.
     """
     store_run_files_in_db(run)
-
 
 
 def get_stored_file(run: FlowRun, relative_path: str) -> FlowRunFile | None:

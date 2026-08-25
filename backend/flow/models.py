@@ -58,6 +58,8 @@ class FlowRun(models.Model):
     error_message = models.TextField(blank=True, default="")
     setup_log = models.TextField(blank=True, default="")
     artifacts_stored = models.BooleanField(default=False)
+    disk_bytes = models.BigIntegerField(default=0)
+    db_bytes = models.BigIntegerField(default=0)
 
     class Meta:
         db_table = "flow_runs"
