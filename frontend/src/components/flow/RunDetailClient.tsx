@@ -85,7 +85,7 @@ const FLOW_CATEGORIES: {
   },
 ];
 
-type DetailTab = "overview" | "results" | "log";
+type DetailTab = "results" | "log";
 
 type StepCategoryMeta = {
   id: string;
@@ -269,6 +269,11 @@ function RingProgress({
   );
 }
 
+function artifactBasename(path: string) {
+  const slash = path.lastIndexOf("/");
+  return slash >= 0 ? path.slice(slash + 1) : path;
+}
+
 function StepOutput({
   runId,
   step,
@@ -279,21 +284,54 @@ function StepOutput({
   const output = step.output || {};
   if (!hasOutputContent(output) && !step.summary) return null;
   if (output.error) {
-    return <pre className="error">{String(output.error)}</pre>;
+    return (
+      <div className="results-error">
+        <p className="results-error-title">Step failed</p>
+        <pre className="error">{String(output.error)}</pre>
+      </div>
+    );
   }
+
   const metrics = (output.metrics || {}) as Record<string, unknown>;
+  const metricKeys = Object.keys(metrics);
   const artifacts = (output.artifacts || []) as Array<{ path: string; size?: number }>;
+  const viewsUpdated = (output.views_updated || []) as string[];
+
   return (
     <div className="step-output">
-      {output.elapsed_s != null ? (
-        <div className="stat-chip">
-          <span className="stat-chip-label">Elapsed</span>
-          <strong>{String(output.elapsed_s)}s</strong>
-        </div>
-      ) : null}
+      <div className="results-summary">
+        {output.elapsed_s != null ? (
+          <div className="results-stat">
+            <span className="results-stat-label">Elapsed</span>
+            <strong>{String(output.elapsed_s)}s</strong>
+          </div>
+        ) : null}
+        {metricKeys.length ? (
+          <div className="results-stat">
+            <span className="results-stat-label">Metrics</span>
+            <strong>{metricKeys.length}</strong>
+          </div>
+        ) : null}
+        {artifacts.length ? (
+          <div className="results-stat">
+            <span className="results-stat-label">Files</span>
+            <strong>{artifacts.length}</strong>
+          </div>
+        ) : null}
+        {viewsUpdated.length ? (
+          <div className="results-stat">
+            <span className="results-stat-label">Views</span>
+            <strong>{viewsUpdated.length}</strong>
+          </div>
+        ) : null}
+      </div>
+
       {output.preview_svg ? (
-        <div className="output-block output-preview">
-          <div className="output-block-title">Layout preview</div>
+        <section className="results-section results-preview">
+          <header className="results-section-head">
+            <h3>Layout preview</h3>
+            <span className="results-section-hint">Interactive SVG</span>
+          </header>
           <div className="preview-svg-wrap">
             <object
               key={`${runId}-${step.order}-${String(output.preview_svg)}`}
@@ -303,36 +341,85 @@ function StepOutput({
               aria-label="Layout preview"
             />
           </div>
-        </div>
+        </section>
       ) : null}
-      {Object.keys(metrics).length ? (
-        <div className="output-block">
-          <div className="output-block-title">Metrics</div>
-          <div className="metrics-grid">
-            {Object.keys(metrics).map((key) => (
-              <div className="metric-card" key={key}>
-                <span className="metric-name">{formatMetricName(key)}</span>
-                <code className="metric-value">{String(metrics[key])}</code>
-              </div>
-            ))}
-          </div>
-        </div>
-      ) : null}
-      {artifacts.length ? (
-        <div className="output-block">
-          <div className="output-block-title">Output files</div>
-          <ul className="artifact-list">
-            {artifacts.map((a) => (
-              <li key={a.path}>
-                <code>{a.path}</code>
-                <span className="meta">{formatBytes(a.size)}</span>
+
+      {viewsUpdated.length ? (
+        <section className="results-section">
+          <header className="results-section-head">
+            <h3>Views updated</h3>
+          </header>
+          <ul className="results-tag-list">
+            {viewsUpdated.map((view) => (
+              <li key={view}>
+                <span className="results-tag">{view}</span>
               </li>
             ))}
           </ul>
-        </div>
+        </section>
       ) : null}
+
+      {metricKeys.length ? (
+        <section className="results-section">
+          <header className="results-section-head">
+            <h3>Metrics</h3>
+            <span className="results-section-hint">{metricKeys.length} values</span>
+          </header>
+          <div className="metrics-table-wrap">
+            <table className="metrics-table">
+              <thead>
+                <tr>
+                  <th scope="col">Metric</th>
+                  <th scope="col">Value</th>
+                </tr>
+              </thead>
+              <tbody>
+                {metricKeys.map((key) => (
+                  <tr key={key}>
+                    <td className="metrics-table-name">{formatMetricName(key)}</td>
+                    <td>
+                      <code className="metrics-table-value">{String(metrics[key])}</code>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : null}
+
+      {artifacts.length ? (
+        <section className="results-section">
+          <header className="results-section-head">
+            <h3>Output files</h3>
+            <span className="results-section-hint">{artifacts.length} artifacts</span>
+          </header>
+          <ul className="artifact-list">
+            {artifacts.map((a) => (
+              <li key={a.path}>
+                <span className="artifact-icon" aria-hidden>
+                  ▤
+                </span>
+                <span className="artifact-copy">
+                  <span className="artifact-name">{artifactBasename(a.path)}</span>
+                  <code className="artifact-path">{a.path}</code>
+                </span>
+                {a.size != null ? (
+                  <span className="artifact-size">{formatBytes(a.size)}</span>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
       {!hasOutputContent(output) && step.summary ? (
-        <pre className="summary step-summary-fallback">{step.summary}</pre>
+        <section className="results-section">
+          <header className="results-section-head">
+            <h3>Summary</h3>
+          </header>
+          <pre className="summary step-summary-fallback">{step.summary}</pre>
+        </section>
       ) : null}
     </div>
   );
@@ -349,7 +436,7 @@ export function RunDetailClient({
 }) {
   const [run, setRun] = useState<FlowRun | null>(null);
   const [tab, setTab] = useState<string | null>(null);
-  const [detailTab, setDetailTab] = useState<DetailTab>("overview");
+  const [detailTab, setDetailTab] = useState<DetailTab>("results");
   const [error, setError] = useState<string | null>(null);
   const busyRef = useRef(false);
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -428,7 +515,7 @@ export function RunDetailClient({
   }, [tab]);
 
   useEffect(() => {
-    setDetailTab("overview");
+    setDetailTab("results");
   }, [tab]);
 
   const isRunning = runBusy;
@@ -607,9 +694,6 @@ export function RunDetailClient({
                     const runningInGroup = group.steps.some(
                       (g) => g.step.status === "running",
                     );
-                    const groupActive = group.steps.some(
-                      (g) => activeTab === `step-${g.step.order}`,
-                    );
                     const firstIdx = group.steps[0].index + 1;
                     const lastIdx = group.steps[group.steps.length - 1].index + 1;
                     const rangeLabel =
@@ -620,65 +704,54 @@ export function RunDetailClient({
                     return (
                       <section
                         key={group.id}
-                        className={`flow-nav-group cat-${group.id}${
-                          groupActive ? " has-active" : ""
-                        }${runningInGroup ? " is-running" : ""}${
-                          failedInGroup ? " has-fail" : ""
-                        }${
+                        className={`flow-nav-group${
+                          runningInGroup ? " is-running" : ""
+                        }${failedInGroup ? " has-fail" : ""}${
                           doneInGroup === group.steps.length ? " is-complete" : ""
                         }`}
                         aria-label={`${group.label} · ${doneInGroup} of ${group.steps.length} complete`}
                       >
-                        <header className="flow-nav-group-head">
-                          <div className="flow-nav-group-phase">
-                            {String(group.phase).padStart(2, "0")}
-                          </div>
-                          <div className="flow-nav-group-copy">
-                            <div className="flow-nav-group-title-row">
-                              <h3 className="flow-nav-group-title">{group.label}</h3>
-                              <span className="flow-nav-group-count">
-                                {doneInGroup}/{group.steps.length}
-                              </span>
-                            </div>
-                            <p className="flow-nav-group-blurb">{group.blurb}</p>
-                            <div className="flow-nav-group-meta">
-                              <span>{rangeLabel}</span>
-                              <span className="flow-nav-group-dot" aria-hidden>
-                                ·
-                              </span>
-                              <span className="flow-nav-group-short">{group.short}</span>
-                              <span className="flow-nav-group-dot" aria-hidden>
-                                ·
-                              </span>
-                              <span
-                                className={`flow-nav-group-summary${
-                                  runningInGroup
-                                    ? " is-running"
-                                    : failedInGroup
-                                      ? " is-failed"
-                                      : doneInGroup === group.steps.length
-                                        ? " is-done"
-                                        : ""
-                                }`}
-                              >
-                                {summary}
-                              </span>
-                            </div>
-                          </div>
-                        </header>
-                        <div
-                          className="flow-nav-group-bar"
-                          aria-hidden
-                          title={`${doneInGroup} of ${group.steps.length} complete`}
-                        >
-                          {group.steps.map(({ step: s }) => (
+                        <div className="flow-nav-group-head" aria-hidden>
+                          <p className="flow-nav-group-label">
+                            <span className="flow-nav-group-phase">
+                              Phase {String(group.phase).padStart(2, "0")}
+                            </span>
+                            <span className="flow-nav-group-title">{group.label}</span>
+                            <span className="flow-nav-group-count">
+                              {doneInGroup}/{group.steps.length}
+                            </span>
+                          </p>
+                          <p className="flow-nav-group-blurb">{group.blurb}</p>
+                          <p className="flow-nav-group-meta">
+                            <span>{rangeLabel}</span>
+                            <span className="flow-nav-group-dot">·</span>
+                            <span className="flow-nav-group-short">{group.short}</span>
+                            <span className="flow-nav-group-dot">·</span>
                             <span
-                              key={s.order}
-                              className={`flow-nav-group-seg status-${s.status}${
-                                activeTab === `step-${s.order}` ? " active" : ""
+                              className={`flow-nav-group-summary${
+                                runningInGroup
+                                  ? " is-running"
+                                  : failedInGroup
+                                    ? " is-failed"
+                                    : doneInGroup === group.steps.length
+                                      ? " is-done"
+                                      : ""
                               }`}
-                            />
-                          ))}
+                            >
+                              {summary}
+                            </span>
+                          </p>
+                          <div
+                            className="flow-nav-group-bar"
+                            title={`${doneInGroup} of ${group.steps.length} complete`}
+                          >
+                            {group.steps.map(({ step: s }) => (
+                              <span
+                                key={s.order}
+                                className={`flow-nav-group-seg status-${s.status}`}
+                              />
+                            ))}
+                          </div>
                         </div>
                         <ol className="flow-nav-list">
                           {group.steps.map(({ step: s, index: i }, localIdx) => {
@@ -769,9 +842,7 @@ export function RunDetailClient({
                         {selectedIndex + 1} / {steps.length}
                       </span>
                       {selectedCategory ? (
-                        <span
-                          className={`step-category-chip cat-${selectedCategory.id}`}
-                        >
+                        <span className="step-category-chip">
                           {selectedCategory.label}
                           <span className="step-category-short">
                             {selectedCategory.short}
@@ -851,7 +922,6 @@ export function RunDetailClient({
                 <div className="step-tabs" role="tablist" aria-label="Step content">
                   {(
                     [
-                      ["overview", "Overview"],
                       ["results", "Results"],
                       ["log", "Log"],
                     ] as const
@@ -874,45 +944,6 @@ export function RunDetailClient({
                 </div>
 
                 <div className="step-tab-panels">
-                  {detailTab === "overview" ? (
-                    <section className="step-tab-panel">
-                      <div className="overview-grid">
-                        <div className="overview-card">
-                          <span className="overview-label">Category</span>
-                          <strong>{selectedCategory?.label || "—"}</strong>
-                        </div>
-                        <div className="overview-card">
-                          <span className="overview-label">Status</span>
-                          <strong>
-                            {STATUS_LABELS[selectedStep.status] || selectedStep.status}
-                          </strong>
-                        </div>
-                        <div className="overview-card">
-                          <span className="overview-label">Step ID</span>
-                          <code>{selectedStep.step_id}</code>
-                        </div>
-                        <div className="overview-card">
-                          <span className="overview-label">Position</span>
-                          <strong>
-                            {selectedIndex + 1} of {steps.length}
-                          </strong>
-                        </div>
-                        <div className="overview-card">
-                          <span className="overview-label">Outputs</span>
-                          <strong>
-                            {hasResults ? "Available" : "None yet"}
-                            {hasLog ? " · log ready" : ""}
-                          </strong>
-                        </div>
-                      </div>
-                      {selectedStep.description ? (
-                        <p className="overview-blurb">{selectedStep.description}</p>
-                      ) : (
-                        <p className="meta">No extra description for this step.</p>
-                      )}
-                    </section>
-                  ) : null}
-
                   {detailTab === "results" ? (
                     <section className="step-tab-panel">
                       {hasResults ? (
