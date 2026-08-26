@@ -24,6 +24,11 @@ urlpatterns = [
     # Keep legacy paths for download URLs used by the UI.
     path("runs/<int:run_id>/status.json", views.run_status, name="run_status_legacy"),
     path(
+        "runs/<int:run_id>/all-files.zip",
+        views.download_run_zip,
+        name="download_run_zip",
+    ),
+    path(
         "runs/<int:run_id>/steps/<int:order>/outputs.zip",
         views.download_step_zip,
         name="download_step_zip",

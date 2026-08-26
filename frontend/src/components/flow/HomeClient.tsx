@@ -20,9 +20,8 @@ import {
 } from "@/lib/verilog";
 import { ModuleHierarchyTree } from "@/components/flow/ModuleHierarchyTree";
 
-function stepsHref(runId: number, watch = false): string {
-  const q = watch ? "?watch=1" : "";
-  return `/runs/${runId}${q}`;
+function stepsHref(runId: number): string {
+  return `/runs/${runId}`;
 }
 
 function formatBytes(bytes: number | undefined | null): string {
@@ -35,6 +34,25 @@ function formatBytes(bytes: number | undefined | null): string {
     n /= 1024;
   }
   return `${bytes} B`;
+}
+
+function shouldShowProgress(run: { status: string }): boolean {
+  return run.status !== "completed";
+}
+
+function progressLabel(run: {
+  progress_pct?: number;
+  steps_done?: number;
+  steps_total?: number;
+}): string {
+  const pct =
+    run.progress_pct != null && !Number.isNaN(Number(run.progress_pct))
+      ? Math.max(0, Math.min(100, Math.round(Number(run.progress_pct))))
+      : 0;
+  if (run.steps_done != null && run.steps_total != null && run.steps_total > 0) {
+    return `${pct}% (${run.steps_done}/${run.steps_total})`;
+  }
+  return `${pct}%`;
 }
 
 export function HomeClient({
@@ -67,22 +85,33 @@ export function HomeClient({
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
-  const loadHome = useCallback(async () => {
-    setLoading(true);
+  const loadHome = useCallback(async (opts?: { silent?: boolean }) => {
+    if (!opts?.silent) setLoading(true);
     const res = await apiFetch<HomePayload>("/api/home");
     if (!res.ok) {
-      setError(res.error || `Failed to load home (HTTP ${res.status}).`);
-      setLoading(false);
+      // Autoreload / brief Django restarts should not spam the overview.
+      if (!opts?.silent) {
+        setError(res.error || `Failed to load home (HTTP ${res.status}).`);
+        setLoading(false);
+      }
       return;
     }
     setData(res.data);
     setError(null);
-    setLoading(false);
+    if (!opts?.silent) setLoading(false);
   }, []);
 
   useEffect(() => {
     void loadHome();
   }, [loadHome]);
+
+  useEffect(() => {
+    if (!data?.busy) return;
+    const id = window.setInterval(() => {
+      void loadHome({ silent: true });
+    }, 2500);
+    return () => window.clearInterval(id);
+  }, [data?.busy, loadHome]);
 
   async function onFilesChosen(fileList: FileList | File[] | null) {
     setAnalyzeError(null);
@@ -209,15 +238,38 @@ export function HomeClient({
       setTopModule("");
       setAnalyzeError(null);
       if (fileInputRef.current) fileInputRef.current.value = "";
-      if (id) {
-        router.push(stepsHref(id));
-        await loadHome();
-        return;
-      }
-      setError("Run was created but no id was returned. Refreshing list…");
       await loadHome();
+      if (!id) {
+        setError("Run was created but no id was returned. Refreshing list…");
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not create run.");
+    } finally {
+      busyRef.current = false;
+      setBusyLocal(false);
+    }
+  }
+
+  async function onRunAll(runId: number) {
+    if (busyRef.current || data?.busy) {
+      setError("A run is already in progress. Wait until it finishes.");
+      return;
+    }
+    const target = data?.runs?.find((r) => r.id === runId);
+    if (target?.status === "completed") {
+      setError("This run is already completed.");
+      return;
+    }
+    busyRef.current = true;
+    setBusyLocal(true);
+    setError(null);
+    try {
+      const res = await apiFetch(`/api/runs/${runId}/run-all`, { method: "POST" });
+      if (!res.ok) {
+        setError(res.error || "Could not start run-all.");
+        return;
+      }
+      await loadHome();
     } finally {
       busyRef.current = false;
       setBusyLocal(false);
@@ -529,7 +581,7 @@ export function HomeClient({
                 : analyzing
                   ? "Analyzing uploaded Verilog…"
                   : analysis?.ok && topModule
-                    ? `Ready — top module ${topModule}. Create a run to open the flow workspace.`
+                    ? `Ready — top module ${topModule}. Create a run to add it to the list below.`
                     : analysis?.ok
                       ? "Select a top module in the hierarchy above."
                       : "Upload and validate Verilog to enable create."}
@@ -572,11 +624,42 @@ export function HomeClient({
                         </Link>
                       </td>
                       <td>
-                        <span className={`status-pill status-${run.status}`}>{run.status}</span>
+                        <div className="run-status-cell">
+                          <span className={`status-pill status-${run.status}`}>
+                            {run.status.replaceAll("_", " ")}
+                          </span>
+                          {shouldShowProgress(run) ? (
+                            <span className="run-progress" title="Step progress">
+                              {progressLabel(run)}
+                            </span>
+                          ) : null}
+                        </div>
                       </td>
                       <td>{run.pdk}</td>
                       <td>{run.clock_period}</td>
                       <td className="run-table-actions">
+                        <button
+                          type="button"
+                          className="btn primary"
+                          disabled={
+                            run.status === "running" ||
+                            run.status === "setting_up" ||
+                            run.status === "completed" ||
+                            locked
+                          }
+                          onClick={() => void onRunAll(run.id)}
+                        >
+                          Run all steps
+                        </button>
+                        {run.status === "completed" && run.can_download_all_files ? (
+                          <a
+                            className="btn"
+                            href={`/runs/${run.id}/all-files.zip`}
+                            download
+                          >
+                            Download all
+                          </a>
+                        ) : null}
                         <button
                           type="button"
                           className="btn danger"

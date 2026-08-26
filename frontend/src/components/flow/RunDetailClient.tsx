@@ -519,10 +519,15 @@ export function RunDetailClient({
   }, [tab]);
 
   const isRunning = runBusy;
+  const isCompleted = run?.status === "completed";
 
   async function startAction(path: string) {
     if (busyRef.current || isRunning) {
       setError("A run is already in progress. Wait until it finishes.");
+      return;
+    }
+    if (isCompleted) {
+      setError("This run is already completed.");
       return;
     }
     busyRef.current = true;
@@ -605,14 +610,25 @@ export function RunDetailClient({
             {run?.error_message ? <pre className="error">{run.error_message}</pre> : null}
             {error ? <pre className="error">{error}</pre> : null}
           </div>
-          <button
-            type="button"
-            className="btn primary btn-run-all"
-            disabled={isRunning || !steps.length}
-            onClick={() => void startAction(`/api/runs/${runId}/run-all`)}
-          >
-            {isRunning ? "Running…" : "Run all steps"}
-          </button>
+          <div className="flow-toolbar-actions">
+            {isCompleted && run?.can_download_all_files ? (
+              <a
+                className="btn"
+                href={`/runs/${runId}/all-files.zip`}
+                download
+              >
+                Download all files
+              </a>
+            ) : null}
+            <button
+              type="button"
+              className="btn primary btn-run-all"
+              disabled={isRunning || isCompleted || !steps.length}
+              onClick={() => void startAction(`/api/runs/${runId}/run-all`)}
+            >
+              {isRunning ? "Running…" : "Run all steps"}
+            </button>
+          </div>
         </section>
 
         <div className="flow-workspace">
@@ -882,7 +898,7 @@ export function RunDetailClient({
                     <button
                       type="button"
                       className="btn primary"
-                      disabled={isRunning}
+                      disabled={isRunning || isCompleted}
                       onClick={() =>
                         void startAction(
                           `/api/runs/${runId}/steps/${selectedStep.order}/run`,
@@ -899,7 +915,7 @@ export function RunDetailClient({
                             href={`/runs/${runId}/steps/${selectedStep.order}/outputs.zip`}
                             download
                           >
-                            Outputs (.zip)
+                            Step outputs (.zip)
                           </a>
                         ) : null}
                         {selectedStep.can_download_preview_source ? (

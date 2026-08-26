@@ -57,6 +57,10 @@ export type FlowRun = {
   updated_at: string | null;
   is_running: boolean;
   owner_username?: string | null;
+  can_download_all_files?: boolean;
+  steps_total?: number;
+  steps_done?: number;
+  progress_pct?: number;
   steps?: FlowStep[];
   verilog_source?: string;
   verilog_files?: string[];

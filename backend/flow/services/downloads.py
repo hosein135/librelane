@@ -418,3 +418,74 @@ def zip_download_filename(run: FlowRun, step: FlowStepResult) -> str:
 def svg_preview_filename(run: FlowRun, step: FlowStepResult) -> str:
     slug = re.sub(r"[^\w.-]+", "_", step.step_id).strip("_") or f"step_{step.order}"
     return f"run-{run.pk}-step-{step.order}-{slug}-preview.svg"
+
+
+def collect_run_disk_files(run: FlowRun) -> list[Path]:
+    work = work_dir_for_run(run)
+    if work is None or not work.is_dir():
+        return []
+    return sorted(
+        (p.resolve() for p in work.rglob("*") if p.is_file()),
+        key=lambda p: str(p).lower(),
+    )
+
+
+def db_files_for_run(run: FlowRun) -> list[FlowRunFile]:
+    if not run.artifacts_stored:
+        return []
+    return list(FlowRunFile.objects.filter(run=run).order_by("relative_path"))
+
+
+def run_can_download_all_files(run: FlowRun) -> bool:
+    """True only for completed runs that have at least one downloadable file."""
+    if run.status != FlowRun.Status.COMPLETED:
+        return False
+    if run.artifacts_stored:
+        return (
+            FlowRunFile.objects.filter(run=run)
+            .exclude(content_type="inode/directory")
+            .exists()
+        )
+    work = work_dir_for_run(run)
+    if work is None or not work.is_dir():
+        return False
+    # Cheap existence check — avoid walking the full tree on every /api/home poll.
+    try:
+        next(p for p in work.iterdir() if p.is_file() or p.is_dir())
+        return True
+    except StopIteration:
+        return False
+
+
+def run_zip_download_filename(run: FlowRun) -> str:
+    design = re.sub(r"[^\w.-]+", "_", run.design_name or "design")
+    design = design.strip("_") or "design"
+    return f"run-{run.pk}-{design}-all-files.zip"
+
+
+def build_run_zip(run: FlowRun) -> bytes:
+    """Zip every file under the run workdir, or all stored FlowRunFile rows."""
+    files = collect_run_disk_files(run)
+    db_files = [] if files else db_files_for_run(run)
+    db_payload = [r for r in db_files if not _is_directory_row(r)]
+    db_dirs = [r for r in db_files if _is_directory_row(r)]
+    if not files and not db_payload and not db_dirs:
+        raise Http404("No output files for this run.")
+
+    work_dir = work_dir_for_run(run)
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for path in files:
+            arcname = path.name
+            if work_dir is not None:
+                try:
+                    arcname = path.relative_to(work_dir).as_posix()
+                except ValueError:
+                    pass
+            zf.write(path, arcname=arcname)
+        for row in db_dirs:
+            zf.writestr(row.relative_path.rstrip("/") + "/", b"")
+        for row in db_payload:
+            zf.writestr(row.relative_path, bytes(row.content))
+    buffer.seek(0)
+    return buffer.getvalue()

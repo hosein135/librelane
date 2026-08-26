@@ -3,11 +3,13 @@ from __future__ import annotations
 import io
 import json
 import threading
+from datetime import timedelta
 from pathlib import Path
 
 from django.conf import settings
 from django.http import FileResponse, Http404, HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect
+from django.utils import timezone as dj_timezone
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
 from flow.auth_helpers import (
@@ -30,11 +32,14 @@ from flow.models import FlowRun, FlowStepResult, User
 from flow.pdk_catalog import SUPPORTED_PDK_VARIANT_LIST, family_for_variant
 from flow.services.downloads import (
     build_preview_svg,
+    build_run_zip,
     build_step_zip,
     preview_source_db_file,
     preview_source_download_filename,
     preview_source_file,
     preview_source_info,
+    run_can_download_all_files,
+    run_zip_download_filename,
     step_can_download_preview_source,
     step_can_download_zip,
     svg_preview_filename,
@@ -70,6 +75,28 @@ def _is_active(run_id: int) -> bool:
     return thread is not None and thread.is_alive()
 
 
+def _run_appears_active(run: FlowRun) -> bool:
+    """True while a worker is live or the run was recently progressing."""
+    if _is_active(run.pk):
+        return True
+    if run.status not in _ACTIVE_STATUSES:
+        return False
+    now = dj_timezone.now()
+    last_touch = run.updated_at or run.created_at
+    if last_touch and (now - last_touch) < timedelta(hours=12):
+        return True
+    running_step = (
+        run.steps.filter(status=FlowStepResult.Status.RUNNING)
+        .order_by("-started_at")
+        .first()
+    )
+    return bool(
+        running_step is not None
+        and running_step.started_at is not None
+        and (now - running_step.started_at) < timedelta(hours=24)
+    )
+
+
 def _user_has_active_run(user: User, *, exclude_run_id: int | None = None) -> bool:
     qs = FlowRun.objects.filter(owner_user=user, status__in=_ACTIVE_STATUSES)
     if exclude_run_id is not None:
@@ -93,8 +120,32 @@ def _user_has_active_run(user: User, *, exclude_run_id: int | None = None) -> bo
 
 
 def _clear_stale_running(run: FlowRun) -> None:
+    """
+    Heal runs left marked running after a worker truly died.
+
+    Never clear a recently-updated active run: session expiry / navigating away
+    must not stop (or appear to stop) an in-progress flow. LibreLane steps can
+    run for hours, so use a long grace window based on run/step activity.
+    """
     if _is_active(run.pk):
         return
+
+    if run.status in _ACTIVE_STATUSES:
+        now = dj_timezone.now()
+        last_touch = run.updated_at or run.created_at
+        if last_touch and (now - last_touch) < timedelta(hours=12):
+            return
+        running_step = (
+            run.steps.filter(status=FlowStepResult.Status.RUNNING)
+            .order_by("-started_at")
+            .first()
+        )
+        if (
+            running_step is not None
+            and running_step.started_at is not None
+            and (now - running_step.started_at) < timedelta(hours=24)
+        ):
+            return
 
     if run.steps.filter(status=FlowStepResult.Status.RUNNING).exists():
         run.steps.filter(status=FlowStepResult.Status.RUNNING).update(
@@ -167,6 +218,9 @@ def _start_background(
         finally:
             _flow_threads.pop(run_id, None)
 
+    # Background workers are independent of the browser session: logging out or
+    # letting the session expire must not cancel them. daemon=True only ties
+    # lifetime to the Django process (not to cookies / HTTP requests).
     thread = threading.Thread(
         target=worker, daemon=True, name=f"{target}-{run_id}"
     )
@@ -190,7 +244,25 @@ def _allocate_unique_run_name(user: User, base: str) -> str:
         n += 1
 
 
+def _run_progress(run: FlowRun) -> dict[str, int]:
+    steps = list(run.steps.all())
+    total = len(steps) or len(NOTEBOOK_STEPS)
+    done = sum(
+        1
+        for s in steps
+        if s.status
+        in (FlowStepResult.Status.DONE, FlowStepResult.Status.SKIPPED)
+    )
+    pct = int(round((100 * done) / total)) if total else 0
+    return {
+        "steps_total": total,
+        "steps_done": done,
+        "progress_pct": pct,
+    }
+
+
 def _run_to_dict(run: FlowRun, *, include_steps: bool = False) -> dict:
+    progress = _run_progress(run)
     data = {
         "id": run.pk,
         "name": run.name,
@@ -211,8 +283,12 @@ def _run_to_dict(run: FlowRun, *, include_steps: bool = False) -> dict:
         "db_bytes": int(getattr(run, "db_bytes", 0) or 0),
         "created_at": run.created_at.isoformat() if run.created_at else None,
         "updated_at": run.updated_at.isoformat() if run.updated_at else None,
-        "is_running": _is_active(run.pk),
+        "is_running": _run_appears_active(run),
         "owner_username": run.owner_user.username if run.owner_user_id else None,
+        "can_download_all_files": run_can_download_all_files(run),
+        "steps_total": progress["steps_total"],
+        "steps_done": progress["steps_done"],
+        "progress_pct": progress["progress_pct"],
     }
     if include_steps:
         data["steps"] = [
@@ -335,6 +411,7 @@ def login(request: HttpRequest) -> HttpResponse:
 
 @require_GET
 def logout(request: HttpRequest) -> HttpResponse:
+    # Clear cookies / nonce only — never touch in-flight flow workers.
     username = get_cookie(request, "username")
     if username:
         User.objects.filter(username=username).update(session_nonce="")
@@ -345,6 +422,7 @@ def logout(request: HttpRequest) -> HttpResponse:
 
 @require_GET
 def session_end(request: HttpRequest) -> HttpResponse:
+    # Session expiry is UI-only; background runs keep going.
     reason_param = request.GET.get("reason")
     if reason_param:
         reason = normalize_session_end_reason(reason_param)
@@ -398,7 +476,12 @@ def api_home(request: HttpRequest) -> JsonResponse:
                 for s in NOTEBOOK_STEPS
             ],
             "busy": busy,
-            "runs": [_run_to_dict(r) for r in FlowRun.objects.filter(owner_user=user).order_by("-created_at")[:20]],
+            "runs": [
+                _run_to_dict(r)
+                for r in FlowRun.objects.filter(owner_user=user)
+                .prefetch_related("steps")
+                .order_by("-created_at")[:20]
+            ],
         }
     )
 
@@ -563,6 +646,11 @@ def run_all(request: HttpRequest, run_id: int) -> HttpResponse:
     if err:
         return err
     assert run is not None
+    if run.status == FlowRun.Status.COMPLETED:
+        return JsonResponse(
+            {"error": "This run is already completed."},
+            status=409,
+        )
     bad = _reject_if_top_module_invalid(run)
     if bad:
         return bad
@@ -584,6 +672,11 @@ def run_step(request: HttpRequest, run_id: int, order: int) -> HttpResponse:
     if err:
         return err
     assert run is not None
+    if run.status == FlowRun.Status.COMPLETED:
+        return JsonResponse(
+            {"error": "This run is already completed."},
+            status=409,
+        )
     bad = _reject_if_top_module_invalid(run)
     if bad:
         return bad
@@ -614,6 +707,25 @@ def run_status(request: HttpRequest, run_id: int) -> JsonResponse:
 
 def _get_run_step(run: FlowRun, order: int) -> FlowStepResult:
     return get_object_or_404(FlowStepResult, run=run, order=order)
+
+
+@require_http_methods(["GET"])
+def download_run_zip(request: HttpRequest, run_id: int) -> FileResponse:
+    run, err = _owned_run(request, run_id)
+    if err:
+        return err  # type: ignore[return-value]
+    assert run is not None
+    if run.status != FlowRun.Status.COMPLETED:
+        raise Http404("Download is only available for completed runs.")
+    data = build_run_zip(run)
+    response = FileResponse(
+        io.BytesIO(data),
+        as_attachment=True,
+        filename=run_zip_download_filename(run),
+        content_type="application/zip",
+    )
+    response["Content-Length"] = len(data)
+    return response
 
 
 @require_http_methods(["GET"])

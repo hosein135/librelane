@@ -209,12 +209,20 @@ def store_run_files_in_db(run: FlowRun) -> int:
 
 def finalize_run_workspace(run: FlowRun) -> None:
     """
-    Persist generated files/folders into Postgres and refresh size counters.
+    Persist generated files/folders into Postgres, then remove the on-disk worktree.
 
-    The on-disk work folder is kept (no automatic deletion on finish).
-    Retention pruning may remove old workdirs later if configured.
+    Called only after a successful (completed) run so downloads can come from
+    FlowRunFile rows and disk space is freed.
     """
-    store_run_files_in_db(run)
+    if not run.artifacts_stored:
+        store_run_files_in_db(run)
+        run.refresh_from_db()
+    if run.artifacts_stored:
+        remove_run_workdir(run)
+        run.refresh_from_db()
+        run.artifacts_stored = True
+        run.save(update_fields=["artifacts_stored", "updated_at"])
+        measure_and_save_run_sizes(run)
 
 
 def get_stored_file(run: FlowRun, relative_path: str) -> FlowRunFile | None:

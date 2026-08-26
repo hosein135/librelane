@@ -853,6 +853,11 @@ select {
   gap: 0.4rem;
 }
 
+.run-table-actions .btn {
+  text-decoration: none;
+  white-space: nowrap;
+}
+
 .run-header .actions {
   margin-top: 0.75rem;
 }
@@ -876,6 +881,21 @@ select {
   border: 0;
   background: var(--bg-soft);
   color: var(--muted);
+  letter-spacing: 0.01em;
+}
+
+.run-status-cell {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem 0.65rem;
+}
+
+.run-progress {
+  font-size: 0.82rem;
+  font-weight: 650;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
   letter-spacing: 0.01em;
 }
 
@@ -1089,11 +1109,19 @@ pre.verilog {
   margin: 0.4rem 0 0;
 }
 
+.flow-toolbar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.65rem;
+  flex: 0 0 auto;
+  align-self: center;
+}
+
 .btn-run-all {
   flex: 0 0 auto;
   padding: 0.75rem 1.35rem;
   font-size: 0.98rem;
-  align-self: center;
 }
 
 .flow-workspace {

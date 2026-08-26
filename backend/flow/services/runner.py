@@ -132,34 +132,51 @@ class FlowRunner:
 
     def run_all(self) -> None:
         try:
-            if self.run.status not in (FlowRun.Status.READY, FlowRun.Status.RUNNING):
+            # Resume incomplete flows without re-setup when the workdir already exists.
+            needs_setup = self.run.status == FlowRun.Status.PENDING or not self._workdir_ready()
+            if needs_setup:
                 self.setup()
             else:
                 # Setup already ran earlier; Config.current_interactive is process-local
                 # and is lost after a server restart — restore from FlowRun scalars.
                 self._ensure_interactive_config()
+                self._seed_step_rows()
 
             self.run.status = FlowRun.Status.RUNNING
-            self.run.save(update_fields=["status", "updated_at"])
+            self.run.error_message = ""
+            self.run.save(update_fields=["status", "error_message", "updated_at"])
+
+            # Pick up LibreLane state from the last successful step.
+            self._state = self._load_state()
 
             for index, spec in enumerate(NOTEBOOK_STEPS):
                 step_row = self.run.steps.get(order=index)
-                if step_row.status == FlowStepResult.Status.DONE:
-                    if self._state is None:
-                        self._state = self._load_state()
+                if step_row.status in (
+                    FlowStepResult.Status.DONE,
+                    FlowStepResult.Status.SKIPPED,
+                ):
                     continue
                 self.run.current_step_index = index
                 self.run.save(update_fields=["current_step_index", "updated_at"])
                 self._run_single(step_row, spec)
 
-            self.run.status = FlowRun.Status.COMPLETED
+            self.run.refresh_from_db()
+            if all(
+                s.status in (FlowStepResult.Status.DONE, FlowStepResult.Status.SKIPPED)
+                for s in self.run.steps.all()
+            ):
+                self.run.status = FlowRun.Status.COMPLETED
+            else:
+                # Should only happen if a step failed and raised into finally.
+                if self.run.status != FlowRun.Status.FAILED:
+                    self.run.status = FlowRun.Status.READY
             self.run.save(update_fields=["status", "updated_at"])
         finally:
             self._finalize_if_terminal()
 
     def run_step(self, order: int) -> None:
         try:
-            if self.run.status == FlowRun.Status.PENDING:
+            if self.run.status == FlowRun.Status.PENDING or not self._workdir_ready():
                 self.setup()
             else:
                 self._ensure_interactive_config()
@@ -168,7 +185,10 @@ class FlowRunner:
             step_row = self.run.steps.get(order=order)
             self.run.status = FlowRun.Status.RUNNING
             self.run.current_step_index = order
-            self.run.save(update_fields=["status", "current_step_index", "updated_at"])
+            self.run.error_message = ""
+            self.run.save(
+                update_fields=["status", "current_step_index", "error_message", "updated_at"]
+            )
             self._run_single(step_row, spec)
 
             if all(
@@ -182,11 +202,20 @@ class FlowRunner:
         finally:
             self._finalize_if_terminal()
 
+    def _workdir_ready(self) -> bool:
+        if not self.run.work_dir:
+            return False
+        try:
+            return Path(self.run.work_dir).expanduser().is_dir()
+        except OSError:
+            return False
+
     def _finalize_if_terminal(self) -> None:
         self.run.refresh_from_db()
-        if self.run.status in (FlowRun.Status.COMPLETED, FlowRun.Status.FAILED):
-            if not self.run.artifacts_stored and self.run.work_dir:
-                finalize_run_workspace(self.run)
+        # Only archive + delete disk after a fully successful run so failed
+        # flows can still resume from on-disk LibreLane state.
+        if self.run.status == FlowRun.Status.COMPLETED:
+            finalize_run_workspace(self.run)
 
     def _run_single(self, step_row: FlowStepResult, spec: StepSpec) -> None:
         from librelane.state import State
