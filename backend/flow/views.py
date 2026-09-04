@@ -45,7 +45,22 @@ from flow.services.downloads import (
     svg_preview_filename,
     zip_download_filename,
 )
-from flow.services.runner import FlowRunner
+from flow.services.fabpack.integrate import load_foundry_gds
+from flow.services.fabpack.jobs import (
+    fab_job_is_running,
+    fab_status,
+    start_fab_job,
+    stop_fab_job,
+    user_has_fab_job,
+)
+from flow.services.fabpack.targets import get_target
+from flow.services.fabrication import (
+    build_fabrication_zip,
+    fabrication_targets_for_run,
+    fabrication_zip_filename,
+    run_can_export_fabrication,
+)
+from flow.services.runner import FlowRunner, ensure_step_rows
 from flow.services.setup import librelane_version
 from flow.services.step_output import output_has_content
 from flow.services.storage import (
@@ -116,6 +131,8 @@ def _user_has_active_run(user: User, *, exclude_run_id: int | None = None) -> bo
             continue
         if other.owner_user_id == user.id:
             return True
+    if user_has_fab_job(user.id):
+        return True
     return False
 
 
@@ -286,6 +303,8 @@ def _run_to_dict(run: FlowRun, *, include_steps: bool = False) -> dict:
         "is_running": _run_appears_active(run),
         "owner_username": run.owner_user.username if run.owner_user_id else None,
         "can_download_all_files": run_can_download_all_files(run),
+        "can_export_fabrication": run_can_export_fabrication(run),
+        "fabrication_targets": fabrication_targets_for_run(run),
         "steps_total": progress["steps_total"],
         "steps_done": progress["steps_done"],
         "progress_pct": progress["progress_pct"],
@@ -589,16 +608,7 @@ def run_detail(request: HttpRequest, run_id: int) -> JsonResponse:
     assert run is not None
     _clear_stale_running(run)
     run.refresh_from_db()
-
-    steps = list(run.steps.all())
-    if not steps:
-        for i, spec in enumerate(NOTEBOOK_STEPS):
-            FlowStepResult.objects.create(
-                run=run,
-                order=i,
-                step_id=spec.step_id,
-                title=spec.title,
-            )
+    ensure_step_rows(run)
 
     work = Path(run.work_dir) if run.work_dir else None
     file_names, verilog_source = read_sources_text(work)
@@ -728,6 +738,144 @@ def download_run_zip(request: HttpRequest, run_id: int) -> FileResponse:
     return response
 
 
+@require_POST
+def start_fabrication_build(
+    request: HttpRequest, run_id: int, target_id: str
+) -> JsonResponse:
+    run, err = _owned_run(request, run_id)
+    if err:
+        return err  # type: ignore[return-value]
+    assert run is not None
+    if not run_can_export_fabrication(run):
+        return JsonResponse(
+            {"error": "Shuttle GDS build is available after the run completes."},
+            status=409,
+        )
+    try:
+        get_target(target_id, run.pdk)
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    if fab_job_is_running(run.pk, target_id):
+        return JsonResponse(fab_status(run, target_id))
+    user = run.owner_user
+    if _user_has_active_run(user):
+        return JsonResponse(
+            {
+                "error": (
+                    "A run or fabrication GDS build is already in progress. "
+                    "Wait until it finishes."
+                )
+            },
+            status=409,
+        )
+    force = bool((_parse_request_data(request) or {}).get("force"))
+    try:
+        start_fab_job(run, target_id, force=force)
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    except StorageLimitError as exc:
+        return JsonResponse({"error": str(exc)}, status=409)
+    return JsonResponse(fab_status(run, target_id))
+
+
+@require_GET
+def fabrication_build_status(
+    request: HttpRequest, run_id: int, target_id: str
+) -> JsonResponse:
+    run, err = _owned_run(request, run_id)
+    if err:
+        return err  # type: ignore[return-value]
+    assert run is not None
+    try:
+        get_target(target_id, run.pdk)
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    return JsonResponse(fab_status(run, target_id))
+
+
+@require_POST
+def stop_fabrication_build(
+    request: HttpRequest, run_id: int, target_id: str
+) -> JsonResponse:
+    """Stop a background shuttle GDS build and delete its generated files."""
+    run, err = _owned_run(request, run_id)
+    if err:
+        return err  # type: ignore[return-value]
+    assert run is not None
+    try:
+        get_target(target_id, run.pdk)
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    if not fab_job_is_running(run.pk, target_id):
+        state = fab_status(run, target_id)
+        if state.get("status") == "running":
+            # Stale "running" on disk/DB with no live process — heal + cleanup.
+            return JsonResponse(stop_fab_job(run, target_id))
+        return JsonResponse(
+            {"error": "No shuttle GDS build is running for this target.", "status": state},
+            status=409,
+        )
+    return JsonResponse(stop_fab_job(run, target_id))
+
+
+@require_http_methods(["GET"])
+def download_fabrication_zip(
+    request: HttpRequest, run_id: int, target_id: str
+) -> HttpResponse:
+    run, err = _owned_run(request, run_id)
+    if err:
+        return err  # type: ignore[return-value]
+    assert run is not None
+    if not run_can_export_fabrication(run):
+        return JsonResponse(
+            {
+                "error": (
+                    "Export to fabrication is available after the run completes "
+                    "and output files are present."
+                )
+            },
+            status=409,
+        )
+    try:
+        get_target(target_id, run.pdk)
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    if fab_job_is_running(run.pk, target_id):
+        return JsonResponse(
+            {
+                "error": "Shuttle top GDS is still building. Wait until it finishes.",
+                "status": fab_status(run, target_id),
+            },
+            status=409,
+        )
+    if load_foundry_gds(run, target_id) is None:
+        return JsonResponse(
+            {
+                "error": (
+                    "Build the shuttle top GDS first (Export to Fabrication → "
+                    "Build shuttle GDS). This is a chip-level LibreLane run and "
+                    "usually takes 30–90 minutes; IHP is a short GDS rename."
+                ),
+                "status": fab_status(run, target_id),
+            },
+            status=409,
+        )
+    try:
+        data = build_fabrication_zip(run, target_id)
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    except Http404 as exc:
+        return JsonResponse({"error": str(exc)}, status=404)
+    response = FileResponse(
+        io.BytesIO(data),
+        as_attachment=True,
+        filename=fabrication_zip_filename(run, target_id),
+        content_type="application/zip",
+    )
+    response["Content-Length"] = len(data)
+    return response
+
+
 @require_http_methods(["GET"])
 def download_step_zip(request: HttpRequest, run_id: int, order: int) -> FileResponse:
     run, err = _owned_run(request, run_id)
@@ -810,7 +958,7 @@ def delete_run(request: HttpRequest, run_id: int) -> HttpResponse:
         return err
     assert run is not None
 
-    if _is_active(run_id):
+    if _is_active(run_id) or fab_job_is_running(run_id):
         return JsonResponse(
             {"error": "Cannot delete a run while it is still executing."},
             status=409,

@@ -108,4 +108,12 @@ NOTEBOOK_STEPS: list[StepSpec] = [
         "Layout vs. Schematic (LVS)",
         "Compare physical implementation to logical netlist.",
     ),
+    # Appended after the notebook steps (keep existing step orders stable):
+    # the LEF abstract is required to integrate the macro into a chip harness
+    # (Caravel user_project_wrapper, Tiny Tapeout, wafer.space chip_top).
+    StepSpec(
+        "Magic.WriteLEF",
+        "Write LEF (Abstract View)",
+        "Write the macro LEF abstract (pins + obstructions) used by fabrication packages.",
+    ),
 ]

@@ -20,6 +20,10 @@ const nextConfig: NextConfig = {
         destination: `${DJANGO_ORIGIN}/runs/:runId/all-files.zip`,
       },
       {
+        source: "/runs/:runId/fabrication/:targetId.zip",
+        destination: `${DJANGO_ORIGIN}/runs/:runId/fabrication/:targetId.zip`,
+      },
+      {
         source: "/runs/:runId/steps/:order/outputs.zip",
         destination: `${DJANGO_ORIGIN}/runs/:runId/steps/:order/outputs.zip`,
       },

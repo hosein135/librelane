@@ -2403,6 +2403,297 @@ pre.verilog {
   text-decoration: none;
 }
 
+.fab-dialog {
+  border: none;
+  padding: 0;
+  background: transparent;
+  max-width: min(52rem, calc(100vw - 2rem));
+  width: 100%;
+  max-height: calc(100vh - 2rem);
+  margin: auto;
+  overflow: hidden;
+}
+
+.fab-dialog::backdrop {
+  background: rgba(15, 23, 42, 0.45);
+}
+
+.fab-dialog-panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  box-shadow: var(--shadow);
+  padding: 1.25rem 1.35rem 1.4rem;
+  max-height: calc(100vh - 2rem);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+.fab-dialog-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+  flex: 0 0 auto;
+}
+
+.fab-dialog-kicker {
+  margin: 0 0 0.2rem;
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.fab-dialog-head h2 {
+  margin: 0 0 0.35rem;
+  font-size: 1.25rem;
+  letter-spacing: -0.03em;
+}
+
+.fab-dialog-head .meta {
+  margin: 0;
+  max-width: 38rem;
+}
+
+.fab-dialog-panel > .error {
+  flex: 0 0 auto;
+  margin-bottom: 0.75rem;
+}
+
+.fab-bg-note {
+  margin: 0 0 0.85rem;
+  padding: 0.55rem 0.75rem;
+  border-radius: 10px;
+  background: var(--info-soft);
+  color: #0c4a6e;
+  font-size: 0.88rem;
+  border: 1px solid #bae6fd;
+}
+
+.fab-stop-btn {
+  color: #b91c1c !important;
+  border-color: #fecaca !important;
+  background: #fff !important;
+}
+
+.fab-stop-btn:hover:not(:disabled) {
+  background: #fef2f2 !important;
+}
+
+.fab-target-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.75rem;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.fab-target-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 0.95rem 1.05rem;
+  background: linear-gradient(180deg, #fff, #f8fafc);
+  min-width: 0;
+}
+
+.fab-target-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.85rem 1.1rem;
+  min-width: 0;
+}
+
+.fab-target-copy {
+  flex: 1 1 16rem;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.fab-target-vendor {
+  margin: 0 0 0.15rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.fab-target-copy h3 {
+  margin: 0 0 0.35rem;
+  font-size: 1.05rem;
+}
+
+.fab-target-copy p {
+  margin: 0 0 0.45rem;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.fab-target-eta {
+  font-size: 0.82rem !important;
+}
+
+.fab-target-status {
+  margin: 0 0 0.45rem;
+  font-size: 0.9rem;
+  color: var(--text);
+}
+
+.fab-target-status.ok {
+  color: #047857;
+}
+
+.fab-target-status.err {
+  color: #b91c1c;
+}
+
+.fab-progress {
+  margin: 0.55rem 0 0.65rem;
+  max-width: 28rem;
+}
+
+.fab-progress-track {
+  height: 0.55rem;
+  border-radius: 999px;
+  background: #e2e8f0;
+  overflow: hidden;
+  position: relative;
+}
+
+.fab-progress-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #2563eb, #0ea5e9);
+  transition: width 0.45s ease;
+}
+
+.fab-progress.is-done .fab-progress-fill {
+  background: linear-gradient(90deg, #059669, #10b981);
+}
+
+.fab-progress.is-failed .fab-progress-fill {
+  background: linear-gradient(90deg, #dc2626, #f97316);
+}
+
+.fab-progress-fill.is-indeterminate {
+  width: 36% !important;
+  animation: fab-progress-slide 1.35s ease-in-out infinite;
+}
+
+.fab-progress.is-running .fab-progress-track {
+  box-shadow: inset 0 0 0 1px rgba(37, 99, 235, 0.12);
+}
+
+.fab-progress-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-top: 0.35rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+@keyframes fab-progress-slide {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(320%);
+  }
+}
+
+.fab-job-errors {
+  margin: 0.35rem 0 0.55rem;
+  max-height: min(8rem, 20vh);
+  overflow: auto;
+  font-size: 0.78rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.fab-job-log {
+  margin: 0.35rem 0 0.55rem;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.fab-job-log-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.35rem;
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text);
+  list-style: none;
+}
+
+.fab-job-log-head::-webkit-details-marker {
+  display: none;
+}
+
+.fab-job-log-head > span::before {
+  content: "▸";
+  display: inline-block;
+  margin-right: 0.35rem;
+  transition: transform 0.12s ease;
+}
+
+.fab-job-log[open] .fab-job-log-head > span::before {
+  transform: rotate(90deg);
+}
+
+.fab-copy-log {
+  flex: 0 0 auto;
+  padding: 0.25rem 0.65rem;
+  font-size: 0.8rem;
+}
+
+.fab-job-log pre.log {
+  max-height: min(22rem, 42vh);
+  margin: 0;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow: auto;
+  white-space: pre;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+.fab-target-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  flex: 0 0 auto;
+  align-self: center;
+}
+
+.fab-target-card .btn {
+  flex: 0 0 auto;
+  align-self: center;
+}
+
 @media (max-width: 900px) {
   .flow-workspace {
     grid-template-columns: 1fr;

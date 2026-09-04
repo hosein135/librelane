@@ -8,6 +8,7 @@ from contextlib import redirect_stderr, redirect_stdout
 import pickle
 from pathlib import Path
 
+from django.db import IntegrityError
 from django.utils import timezone as dj_timezone
 
 from flow.models import FlowRun, FlowStepResult, User
@@ -17,6 +18,31 @@ from flow.services.storage import StorageLimitError, assert_can_continue_run
 from flow.services.verilog import list_verilog_paths, require_top_module_in_workdir
 from flow.services.workdir import create_run_workdir, finalize_run_workspace, measure_and_save_run_sizes
 from flow.steps import NOTEBOOK_STEPS, StepSpec
+
+
+def ensure_step_rows(run: FlowRun) -> None:
+    """
+    Make sure every NOTEBOOK_STEPS index has a FlowStepResult row.
+
+    Rows are only ever added (as ``pending``), never changed, so runs created
+    before a step was appended to the catalog can still pick it up when they
+    are resumed. Completed runs are left untouched: their step list is final.
+    """
+    if run.status == FlowRun.Status.COMPLETED:
+        return
+    existing = set(run.steps.values_list("order", flat=True))
+    missing = [
+        FlowStepResult(run=run, order=i, step_id=spec.step_id, title=spec.title)
+        for i, spec in enumerate(NOTEBOOK_STEPS)
+        if i not in existing
+    ]
+    if not missing:
+        return
+    try:
+        FlowStepResult.objects.bulk_create(missing)
+    except IntegrityError:
+        # A concurrent request seeded the same rows; nothing left to do.
+        pass
 
 
 class FlowRunner:
@@ -180,6 +206,7 @@ class FlowRunner:
                 self.setup()
             else:
                 self._ensure_interactive_config()
+                self._seed_step_rows()
 
             spec = NOTEBOOK_STEPS[order]
             step_row = self.run.steps.get(order=order)
@@ -319,19 +346,7 @@ class FlowRunner:
             )
 
     def _seed_step_rows(self) -> None:
-        if self.run.steps.exists():
-            return
-        FlowStepResult.objects.bulk_create(
-            [
-                FlowStepResult(
-                    run=self.run,
-                    order=i,
-                    step_id=spec.step_id,
-                    title=spec.title,
-                )
-                for i, spec in enumerate(NOTEBOOK_STEPS)
-            ]
-        )
+        ensure_step_rows(self.run)
 
     def _save_state(self) -> None:
         if self._state is None or self._state_file is None:

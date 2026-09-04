@@ -35,6 +35,37 @@ export type StorageInfo = {
   user_used_pct: number;
 };
 
+export type FabTarget = {
+  id: string;
+  label: string;
+  vendor: string;
+  description: string;
+  pdks: string[];
+  submit_url: string;
+  docs_url: string;
+  template_repo?: string;
+  build_kind?: string;
+  eta?: string;
+};
+
+export type FabJobStatus = {
+  status: "idle" | "running" | "done" | "failed" | "stopped" | string;
+  target?: string;
+  message?: string;
+  error?: string;
+  running?: boolean;
+  ready?: boolean;
+  gds?: string;
+  bytes?: number;
+  log?: string;
+  errors?: string[];
+  progress_pct?: number;
+  progress_step?: number | null;
+  progress_total?: number | null;
+  progress_label?: string;
+  progress_indeterminate?: boolean;
+};
+
 export type FlowRun = {
   id: number;
   name: string;
@@ -58,6 +89,8 @@ export type FlowRun = {
   is_running: boolean;
   owner_username?: string | null;
   can_download_all_files?: boolean;
+  can_export_fabrication?: boolean;
+  fabrication_targets?: FabTarget[];
   steps_total?: number;
   steps_done?: number;
   progress_pct?: number;

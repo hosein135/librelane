@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AppShell } from "@/components/layout/AppShell";
 import { apiFetch, type FlowRun, type FlowStep } from "@/lib/api";
+import { ExportFabricationButton } from "@/components/flow/ExportFabrication";
 
 const STATUS_LABELS: Record<string, string> = {
   pending: "Pending",
@@ -620,6 +621,12 @@ export function RunDetailClient({
                 Download all files
               </a>
             ) : null}
+            <ExportFabricationButton
+              runId={runId}
+              enabled={Boolean(isCompleted && run?.can_export_fabrication)}
+              pdk={run?.pdk}
+              targets={run?.fabrication_targets || []}
+            />
             <button
               type="button"
               className="btn primary btn-run-all"

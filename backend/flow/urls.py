@@ -29,6 +29,26 @@ urlpatterns = [
         name="download_run_zip",
     ),
     path(
+        "runs/<int:run_id>/fabrication/<slug:target_id>.zip",
+        views.download_fabrication_zip,
+        name="download_fabrication_zip",
+    ),
+    path(
+        "api/runs/<int:run_id>/fabrication/<slug:target_id>/build",
+        views.start_fabrication_build,
+        name="start_fabrication_build",
+    ),
+    path(
+        "api/runs/<int:run_id>/fabrication/<slug:target_id>/status",
+        views.fabrication_build_status,
+        name="fabrication_build_status",
+    ),
+    path(
+        "api/runs/<int:run_id>/fabrication/<slug:target_id>/stop",
+        views.stop_fabrication_build,
+        name="stop_fabrication_build",
+    ),
+    path(
         "runs/<int:run_id>/steps/<int:order>/outputs.zip",
         views.download_step_zip,
         name="download_step_zip",

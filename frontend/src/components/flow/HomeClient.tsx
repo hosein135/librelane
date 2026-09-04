@@ -19,6 +19,7 @@ import {
   type VerilogAnalysis,
 } from "@/lib/verilog";
 import { ModuleHierarchyTree } from "@/components/flow/ModuleHierarchyTree";
+import { ExportFabricationButton } from "@/components/flow/ExportFabrication";
 
 function stepsHref(runId: number): string {
   return `/runs/${runId}`;
@@ -319,7 +320,7 @@ export function HomeClient({
         </p>
         {data?.busy ? (
           <p className="meta">
-            You have a run in progress — finish it before starting another.
+            You have a run or fabrication GDS build in progress — finish it before starting another.
           </p>
         ) : null}
       </section>
@@ -660,6 +661,15 @@ export function HomeClient({
                             Download all
                           </a>
                         ) : null}
+                        <ExportFabricationButton
+                          runId={run.id}
+                          enabled={
+                            run.status === "completed" &&
+                            Boolean(run.can_export_fabrication)
+                          }
+                          pdk={run.pdk}
+                          targets={run.fabrication_targets || []}
+                        />
                         <button
                           type="button"
                           className="btn danger"
