@@ -799,8 +799,8 @@ host_warn_if_git_dirty() {
 }
 
 # --- Nix version --------------------------------------------------------
-# flake.lock version 7 needs Nix >= 2.18. Several installs can sit on one
-# machine; pick the newest binary that actually runs.
+# Several Nix binaries can sit on one machine. Pick the newest that runs;
+# run.sh then keeps it only when it is the pinned NixOS 25.05 release.
 
 host_nix_parse_version() {
     local line

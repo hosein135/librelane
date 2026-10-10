@@ -49,13 +49,14 @@ sanitize_shell_file "${SCRIPT_DIR}/scripts/host-prep.sh"
 # shellcheck source=scripts/host-prep.sh
 . "${SCRIPT_DIR}/scripts/host-prep.sh"
 CURL_STATIC_VERSION="8.20.0"
-# Pin a Nix that still supports flakes. Latest 2.35.x crashes in non-TTY / WSL
-# installs (ioctl PTY + NIX_BECOME abort). An older install is upgraded or
-# replaced; a newer one is kept when it can read flake.lock (version 7, Nix >= 2.18).
-NIX_INSTALL_URL="https://releases.nixos.org/nix/nix-2.24.12/install"
-NIX_MIN_MAJOR=2
-NIX_MIN_MINOR=18
-NIX_MIN_PATCH=0
+# NixOS 25.05's package manager is Nix 2.28.5 (nixpkgs nixVersions.stable).
+# Any other Nix, including a newer 2.35, is replaced. nix upgrade-nix is not
+# used: it installs the latest manager and changes flake.lock behavior.
+NIX_PIN_VERSION="2.28.5"
+NIX_PIN_MAJOR=2
+NIX_PIN_MINOR=28
+NIX_PIN_PATCH=5
+NIX_INSTALL_URL="https://releases.nixos.org/nix/nix-${NIX_PIN_VERSION}/install"
 SYSTEM_CACHE_ROOT="${XDG_CACHE_HOME:-${HOME}/.cache}/librelane-web"
 SYSTEM_CACHE=""
 SYSTEM_PROFILE=""
@@ -89,9 +90,9 @@ LibreLane web — setup or start (Linux / macOS / WSL).
 
 Missing git and curl are installed with the distro package manager
 (Homebrew on macOS). If curl still cannot be installed, a static binary
-is downloaded. Nix is installed when it is missing. An existing Nix older than 2.18, or a
-store written by a different Nix, is upgraded or replaced with 2.24.12.
-A newer Nix that works is left in place.
+is downloaded. Nix 2.28.5 (the NixOS 25.05 package manager) is required.
+Any other Nix is replaced. On NixOS, /nix is kept and 2.28.5 is
+installed into your user profile.
 
 sudo ./run.sh continues as the user who invoked sudo.
 
@@ -179,6 +180,22 @@ flake_lock_needs_refresh() {
     [ ! -f "${FLAKE_DIR}/flake.lock" ] && return 0
     grep -q '"path".*vendor/librelane' "${FLAKE_DIR}/flake.lock" 2>/dev/null && return 0
     return 1
+}
+
+# Nix 2.35: "requires lock file changes but they're not allowed due to '--no-update-lock-file'".
+# Older Nix: unlocked inputs, or a lock that does not match flake.nix.
+flake_lock_rejected() {
+    local err_file="$1"
+    [ -f "${err_file}" ] || return 1
+    grep -qE 'unlocked input|lock file contains|does not match|requires lock file changes|no-update-lock-file' \
+        "${err_file}" 2>/dev/null
+}
+
+refresh_flake_lock() {
+    warn "flake.lock does not match this Nix. Updating it, then retrying."
+    nix_cmd flake lock "${FLAKE_DIR}"
+    mkdir -p "${SYSTEM_CACHE}"
+    cp -f "${FLAKE_DIR}/flake.lock" "${SYSTEM_LOCK}"
 }
 
 invalidate_system_nix_cache() {
@@ -569,15 +586,59 @@ nix_reload_bin() {
     nix_activate_bin "${best}"
 }
 
-nix_try_upgrade() {
-    info "Upgrading the installed Nix to ${NIX_MIN_MAJOR}.${NIX_MIN_MINOR} or newer."
-    if [ -S /nix/var/nix/daemon-socket/socket ]; then
-        host_as_root "${NIX_BIN}" --extra-experimental-features "nix-command flakes" upgrade-nix
-        if command -v systemctl >/dev/null 2>&1; then
-            host_as_root systemctl restart nix-daemon.socket nix-daemon.service >/dev/null 2>&1 || true
+nix_version_is_pinned() {
+    [ "$1" -eq "${NIX_PIN_MAJOR}" ] \
+        && [ "$2" -eq "${NIX_PIN_MINOR}" ] \
+        && [ "$3" -eq "${NIX_PIN_PATCH}" ]
+}
+
+# Use an already-installed Nix 2.28.5 even when a newer distro or NixOS
+# binary is earlier on PATH.
+nix_prefer_pinned_bin() {
+    local cand maj min pat
+    for cand in \
+        "${HOME:-}/.nix-profile/bin/nix" \
+        "/nix/var/nix/profiles/per-user/${USER:-}/profile/bin/nix" \
+        /nix/var/nix/profiles/default/bin/nix \
+        /run/current-system/sw/bin/nix
+    do
+        [ -n "${cand}" ] && [ -x "${cand}" ] || continue
+        if read -r maj min pat < <(host_nix_parse_version "${cand}"); then
+            if nix_version_is_pinned "${maj}" "${min}" "${pat}"; then
+                nix_activate_bin "${cand}"
+                return 0
+            fi
         fi
-    else
-        "${NIX_BIN}" --extra-experimental-features "nix-command flakes" upgrade-nix
+    done
+    return 1
+}
+
+nixpkgs_25_05_rev() {
+    local lock="${FLAKE_DIR}/flake.lock" rev
+    [ -f "${lock}" ] || return 1
+    rev="$(awk '
+        /"rev":/ { gsub(/[",]/, "", $2); rev = $2 }
+        /"ref": "nixos-25.05"/ { print rev; exit }
+    ' "${lock}")"
+    [ -n "${rev}" ] || return 1
+    printf '%s\n' "${rev}"
+}
+
+# NixOS owns /nix. Put the pinned package manager in the user profile.
+nix_install_pinned_on_nixos() {
+    local rev
+    rev="$(nixpkgs_25_05_rev)" || {
+        error "Could not read the nixos-25.05 revision from ${FLAKE_DIR}/flake.lock."
+        return 1
+    }
+    info "This is NixOS. Installing Nix ${NIX_PIN_VERSION} into the user profile."
+    info "The system /nix store is left in place."
+    "${NIX_BIN}" --extra-experimental-features "nix-command flakes" profile install \
+        --accept-flake-config \
+        "github:NixOS/nixpkgs/${rev}#nixVersions.nix_2_28" || return 1
+    if ! nix_prefer_pinned_bin; then
+        error "Nix ${NIX_PIN_VERSION} installed, but it is not available in the user profile."
+        return 1
     fi
 }
 
@@ -648,13 +709,18 @@ nix_install_pinned() {
 }
 
 nix_replace_and_recheck() {
+    if host_is_nixos; then
+        error "This is NixOS. Refusing to delete /nix."
+        error "Set nix.package = pkgs.nixVersions.nix_2_28 and run: sudo nixos-rebuild switch"
+        return 1
+    fi
     if [ "${NIX_REPAIR:-}" = "1" ]; then
         error "Nix is still not usable after replacing the previous install."
         return 1
     fi
     export NIX_REPAIR=1
     export NIX_REPLACE=1
-    step "Replacing this Nix with the pinned 2.24.12 installer."
+    step "Replacing this Nix with pinned Nix ${NIX_PIN_VERSION}."
     nix_install_pinned || return 1
     nix_reload_bin || return 1
     nix_check_existing
@@ -761,7 +827,7 @@ EOF
             ;;
         *database*|*schema*|*not\ compatible*)
             error "The Nix database was written by a different Nix version."
-            error "Re-run ./run.sh to replace it with Nix 2.24.12, or upgrade Nix so it matches that database."
+            error "Re-run ./run.sh to replace it with Nix ${NIX_PIN_VERSION}."
             ;;
         *)
             error "Re-run ./run.sh after the previous Nix is removed, or reinstall from ${NIX_INSTALL_URL}"
@@ -795,18 +861,26 @@ nix_check_existing() {
     source_nix_profile || true
     enable_flakes
     first="$(command -v nix 2>/dev/null || true)"
-    if ! best="$(host_nix_select_bin)"; then
+    if nix_prefer_pinned_bin; then
+        best="${NIX_BIN}"
+    elif ! best="$(host_nix_select_bin)"; then
         if [ "${NIX_REPAIR:-}" = "1" ]; then
             error "Nix binaries still do not run after reinstall."
+            return 1
+        fi
+        if host_is_nixos; then
+            error "Nix is not available on this NixOS system."
+            error "Boot a generation that includes nix, then run ./run.sh again."
             return 1
         fi
         info "The Nix binary on this machine does not run. Replacing it."
         nix_replace_and_recheck || return 1
         return 0
-    fi
-    nix_activate_bin "${best}"
-    if [ -n "${first}" ] && [ "${first}" != "${best}" ]; then
-        info "Using ${best} (newer Nix than ${first})."
+    else
+        nix_activate_bin "${best}"
+        if [ -n "${first}" ] && [ "${first}" != "${best}" ]; then
+            info "Using ${best} (newer Nix than ${first})."
+        fi
     fi
 
     if ! read -r maj min pat < <(host_nix_parse_version "${NIX_BIN}"); then
@@ -820,25 +894,26 @@ nix_check_existing() {
     fi
 
     channel="$(nix_foreign_channel || true)"
-    if ! host_nix_ver_ge "${maj}" "${min}" "${pat}" \
-        "${NIX_MIN_MAJOR}" "${NIX_MIN_MINOR}" "${NIX_MIN_PATCH}"; then
+    if ! nix_version_is_pinned "${maj}" "${min}" "${pat}"; then
         if [ "${NIX_REPAIR:-}" = "1" ]; then
-            error "Nix ${maj}.${min}.${pat} is still older than Nix ${NIX_MIN_MAJOR}.${NIX_MIN_MINOR} after reinstall."
+            error "Nix ${maj}.${min}.${pat} is still not Nix ${NIX_PIN_VERSION} after reinstall."
             return 1
         fi
-        info "Nix ${maj}.${min}.${pat} is older than Nix ${NIX_MIN_MAJOR}.${NIX_MIN_MINOR} (flake.lock version 7)."
+        if host_is_nixos; then
+            if [ "${NIX_NIXOS_PIN_TRIED:-}" = "1" ]; then
+                error "This NixOS system still provides Nix ${maj}.${min}.${pat}, not Nix ${NIX_PIN_VERSION}."
+                error "Set nix.package = pkgs.nixVersions.nix_2_28 and run: sudo nixos-rebuild switch"
+                return 1
+            fi
+            export NIX_NIXOS_PIN_TRIED=1
+            nix_install_pinned_on_nixos || return 1
+            nix_check_existing || return 1
+            return 0
+        fi
+        info "Nix ${maj}.${min}.${pat} is not pinned Nix ${NIX_PIN_VERSION} (NixOS 25.05). Replacing it."
         if [ -n "${channel}" ]; then
             info "Existing nixpkgs channel: ${channel}"
         fi
-        if [ "${NIX_UPGRADED:-}" != "1" ]; then
-            export NIX_UPGRADED=1
-            if nix_try_upgrade; then
-                nix_reload_bin || return 1
-                nix_check_existing || return 1
-                return 0
-            fi
-        fi
-        info "Upgrade failed. Replacing this Nix install with 2.24.12."
         nix_replace_and_recheck || return 1
         return 0
     fi
@@ -865,7 +940,7 @@ nix_check_existing() {
             fi
         fi
         if [ "${NIX_REPAIR:-}" != "1" ]; then
-            info "The existing Nix store is unusable. Installing Nix 2.24.12."
+            info "The existing Nix store is unusable. Installing Nix ${NIX_PIN_VERSION}."
             nix_replace_and_recheck || return 1
             return 0
         fi
@@ -935,7 +1010,7 @@ nix_check_existing() {
         warn "nix.conf does not list flakes. This run enables them with NIX_CONFIG."
     fi
 
-    info "Nix ${maj}.${min}.${pat}"
+    info "Nix ${maj}.${min}.${pat} (pinned for NixOS 25.05)"
     return 0
 }
 
@@ -946,7 +1021,7 @@ ensure_nix() {
         nix_check_existing || exit 1
         return 0
     fi
-    step "Nix not found — installing Nix 2.24.12 (no OS package manager) ..."
+    step "Nix not found — installing Nix ${NIX_PIN_VERSION} (no OS package manager) ..."
     nix_install_pinned || exit 1
     nix_check_existing || exit 1
 }
@@ -960,6 +1035,7 @@ ensure_flakes() {
 }
 
 ensure_flake_lock() {
+    local meta_err
     if [ ! -f "${FLAKE_DIR}/flake.nix" ]; then
         error "flake.nix missing in ${FLAKE_DIR}"
         exit 1
@@ -967,11 +1043,25 @@ ensure_flake_lock() {
     if [ ! -f "${FLAKE_DIR}/flake.lock" ] && [ -f "${SYSTEM_LOCK}" ]; then
         restore_cached_flake_lock
     fi
+    mkdir -p "${SYSTEM_CACHE}"
     if flake_lock_needs_refresh; then
         step "Creating/updating flake.lock (nixpkgs 25.05) ..."
         nix_cmd flake lock "${FLAKE_DIR}"
+    elif [ -f "${FLAKE_DIR}/flake.lock" ]; then
+        # Nix 2.35 rejects a lock written by an older Nix when --no-update-lock-file
+        # is set. Probe before the dev-shell download so that case updates the lock.
+        meta_err="${SYSTEM_CACHE}/lock.err"
+        if ! nix_cmd flake metadata "${FLAKE_DIR}" --no-update-lock-file --json \
+            >/dev/null 2>"${meta_err}"; then
+            if flake_lock_rejected "${meta_err}"; then
+                refresh_flake_lock
+            else
+                cat "${meta_err}" >&2
+                exit 1
+            fi
+        fi
+        rm -f "${meta_err}"
     fi
-    mkdir -p "${SYSTEM_CACHE}"
     cp -f "${FLAKE_DIR}/flake.lock" "${SYSTEM_LOCK}"
 }
 
@@ -989,25 +1079,47 @@ realize_nix_shell() {
     mkdir -p "${SYSTEM_CACHE}"
     step "Fetching Nix packages into the system cache (once per machine / flake) ..."
     local develop_err="${SYSTEM_CACHE}/develop.err"
-    if ! nix_cmd develop "${FLAKE_DIR}" \
-        --profile "${SYSTEM_PROFILE}" \
-        --no-update-lock-file \
-        --command true 2>"${develop_err}"; then
-        if grep -qE 'unlocked input|lock file contains|does not match' "${develop_err}" 2>/dev/null; then
-            warn "flake.lock out of date — refreshing and retrying ..."
-            nix_cmd flake lock "${FLAKE_DIR}"
-            cp -f "${FLAKE_DIR}/flake.lock" "${SYSTEM_LOCK}"
-            nix_cmd develop "${FLAKE_DIR}" \
-                --profile "${SYSTEM_PROFILE}" \
-                --no-update-lock-file \
-                --command true
+    nix_develop_locked() {
+        nix_cmd develop "${FLAKE_DIR}" \
+            --profile "${SYSTEM_PROFILE}" \
+            --no-update-lock-file \
+            --command true 2>"${develop_err}"
+    }
+    if ! nix_develop_locked; then
+        if flake_lock_rejected "${develop_err}"; then
+            refresh_flake_lock
+            if ! nix_develop_locked; then
+                if flake_lock_rejected "${develop_err}"; then
+                    # A dirty git checkout is fetched as git+file://. Nix 2.35 can
+                    # still insist on writing the lock during that fetch.
+                    warn "Nix still wants to write flake.lock. Allowing that for this fetch."
+                    nix_cmd develop "${FLAKE_DIR}" \
+                        --profile "${SYSTEM_PROFILE}" \
+                        --command true 2>"${develop_err}" \
+                        || { cat "${develop_err}" >&2; exit 1; }
+                    cp -f "${FLAKE_DIR}/flake.lock" "${SYSTEM_LOCK}"
+                else
+                    cat "${develop_err}" >&2
+                    exit 1
+                fi
+            fi
         else
             cat "${develop_err}" >&2
             exit 1
         fi
     fi
-    if nix_cmd print-dev-env "${FLAKE_DIR}" --offline --no-update-lock-file \
-        | tr -d '\r' > "${SYSTEM_DEVENV}.tmp"; then
+    if ! nix_cmd print-dev-env "${FLAKE_DIR}" --offline --no-update-lock-file \
+        2>"${develop_err}" | tr -d '\r' > "${SYSTEM_DEVENV}.tmp"; then
+        if flake_lock_rejected "${develop_err}"; then
+            warn "Nix still wants to write flake.lock. Saving the dev environment anyway."
+            nix_cmd print-dev-env "${FLAKE_DIR}" --offline \
+                2>"${develop_err}" | tr -d '\r' > "${SYSTEM_DEVENV}.tmp" \
+                || rm -f "${SYSTEM_DEVENV}.tmp"
+        else
+            rm -f "${SYSTEM_DEVENV}.tmp"
+        fi
+    fi
+    if [ -s "${SYSTEM_DEVENV}.tmp" ]; then
         mv -f "${SYSTEM_DEVENV}.tmp" "${SYSTEM_DEVENV}"
         sanitize_shell_file "${SYSTEM_DEVENV}"
     else
@@ -1695,10 +1807,12 @@ run_inside_nix() {
         ) &
         launch_pid=$!
     else
+        # No --no-update-lock-file here. Nix 2.35 rejects a dirty git+file flake
+        # when that flag is set, and this path is only the fallback when
+        # devenv.sh could not be saved.
         nix_cmd develop "${FLAKE_DIR}" \
             --profile "${SYSTEM_PROFILE}" \
             --offline \
-            --no-update-lock-file \
             --command bash "${SCRIPT_DIR}/run.sh" --__launch "$@" &
         launch_pid=$!
     fi

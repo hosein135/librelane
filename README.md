@@ -9,7 +9,7 @@ Turns the [LibreLane Colab notebook](notebook.ipynb) into a Linux web app:
 
 ## Requirements
 
-- **Linux or macOS** (WSL is fine). `./run.sh` installs Nix 2.24.12 if it is missing. An existing Nix older than 2.18, or a store left by a different Nix version, is upgraded or replaced. A newer Nix that can read `flake.lock` is kept. Missing `git` and `curl` are installed with the distro package manager (Homebrew on macOS). If curl still cannot be installed, a static curl is downloaded. `sudo ./run.sh` continues as the user who invoked sudo.
+- **Linux or macOS** (WSL is fine). `./run.sh` requires Nix **2.28.5**, the package manager shipped with NixOS 25.05. Any other Nix (older or newer, including a NixOS release's Nix) is replaced with that release. On NixOS itself, `/nix` is kept and 2.28.5 is installed into your user profile. Missing `git` and `curl` are installed with the distro package manager (Homebrew on macOS). If curl still cannot be installed, a static curl is downloaded. `sudo ./run.sh` continues as the user who invoked sudo.
 - **Free disk** on first run: about 12 GB when the Nix store and PDKs share a disk (`LIBRELANE_INSTALL_FREE_BYTES`). PDKs on their own disk need about 4 GB (`LIBRELANE_PDK_FREE_BYTES`). Later runs keep at least 5 GB free for flow data (`LIBRELANE_MIN_FREE_BYTES`, the same floor the app enforces). PDKs land under `~/.ciel`.
 
 ## Quick start
