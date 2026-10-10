@@ -9,6 +9,9 @@
 # workdir (polling — reliable on /mnt/c where inotify often does not work).
 # Heavy dirs (node_modules, .next, Postgres data, …) are preserved.
 #
+# Before the copy: install missing git/curl, keep the source checkout on LF,
+# and refuse to sync when the workdir disk is too small (scripts/host-prep.sh).
+#
 # Usage:
 #   ./dev_run.sh                 # sync + watch + ./run.sh
 #   ./dev_run.sh --prep-only
@@ -39,6 +42,9 @@ sanitize_shell_file() {
 sanitize_shell_file "${BASH_SOURCE[0]}"
 
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+sanitize_shell_file "${SOURCE_DIR}/scripts/host-prep.sh"
+# shellcheck source=scripts/host-prep.sh
+. "${SOURCE_DIR}/scripts/host-prep.sh"
 WORK_DIR=""
 CHILD_PID=""
 WATCHER_PID=""
@@ -291,7 +297,25 @@ start_live_watcher() {
 for arg in "$@"; do
     case "$arg" in
         --help|-h)
-            sed -n '3,21p' "$0" | sed 's/^# //'
+            cat <<'EOF'
+Run LibreLane from a Linux-native persistent work copy (WSL-friendly).
+
+Syncs this repo off /mnt/c (or any Windows mount) into
+~/.cache/librelane-dev-runs/workdir, then runs ./run.sh there.
+Edits in the source tree are copied into the workdir while it runs.
+node_modules, .next, and Postgres data stay in the workdir.
+
+  ./dev_run.sh                 sync + watch + ./run.sh
+  ./dev_run.sh --prep-only
+  ./dev_run.sh --force-setup
+  ./dev_run.sh --clean-workdir wipe the workdir once, then sync + run
+  ./dev_run.sh --no-watch      disable live change sync
+
+Missing git and curl are installed before the copy. The workdir disk
+must have room for the copy (about 3 GiB the first time, 1 GiB after
+node_modules exists). Override with LIBRELANE_DEV_FREE_BYTES.
+sudo ./dev_run.sh continues as the user who invoked sudo.
+EOF
             exit 0 ;;
         --clean-workdir)
             CLEAN_WORKDIR=true
@@ -309,6 +333,8 @@ if [ ! -f "${SOURCE_DIR}/run.sh" ]; then
     error "run.sh missing next to this script: ${SOURCE_DIR}"
     exit 1
 fi
+
+host_rerun_as_desktop_user "${SOURCE_DIR}/dev_run.sh" "$@" || exit 1
 
 trap on_interrupt INT TERM
 trap on_exit EXIT
@@ -338,6 +364,32 @@ info "Workdir (Linux, persistent): ${WORK_DIR}"
 if [ "${CLEAN_WORKDIR}" = true ]; then
     wipe_workdir
 fi
+
+if ! command -v git >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
+    host_ensure_git_and_curl \
+        || warn "Could not install missing git/curl yet; ./run.sh will retry."
+fi
+# Restore missing tracked files in the source tree before the copy. A dirty
+# source tree is normal here, so skip the Nix dirty-tree warning.
+host_prepare_git "${SOURCE_DIR}" false || exit 1
+
+FLAKE_DIR="${SOURCE_DIR}/devops"
+if [ -z "${LIBRELANE_DATA_DIR:-}" ]; then
+    export LIBRELANE_DATA_DIR="${WORK_DIR}/.librelane-data"
+fi
+# --force-setup throws away the Nix env, so budget a fresh download.
+dev_force=false
+if [ "${#RUN_ARGS[@]}" -gt 0 ]; then
+    for arg in "${RUN_ARGS[@]}"; do
+        if [ "${arg}" = "--force-setup" ]; then
+            dev_force=true
+        fi
+    done
+fi
+if [ "${dev_force}" = true ]; then
+    SYSTEM_READY="${WORK_DIR}/.nix-not-ready"
+fi
+host_check_free_space false "${WORK_DIR}" || exit 1
 
 sync_repo_to "${WORK_DIR}"
 

@@ -9,8 +9,8 @@ Turns the [LibreLane Colab notebook](notebook.ipynb) into a Linux web app:
 
 ## Requirements
 
-- **Linux** (or macOS) with [Nix](https://nixos.org/) 2.11+ (or let `./run.sh` install it)
-- ~10 GB free disk (Nix store + sky130 PDK under `~/.ciel`)
+- **Linux or macOS** (WSL is fine). `./run.sh` installs Nix 2.24.12 if it is missing. An existing Nix older than 2.18, or a store left by a different Nix version, is upgraded or replaced. A newer Nix that can read `flake.lock` is kept. Missing `git` and `curl` are installed with the distro package manager (Homebrew on macOS). If curl still cannot be installed, a static curl is downloaded. `sudo ./run.sh` continues as the user who invoked sudo.
+- **Free disk** on first run: about 12 GB when the Nix store and PDKs share a disk (`LIBRELANE_INSTALL_FREE_BYTES`). PDKs on their own disk need about 4 GB (`LIBRELANE_PDK_FREE_BYTES`). Later runs keep at least 5 GB free for flow data (`LIBRELANE_MIN_FREE_BYTES`, the same floor the app enforces). PDKs land under `~/.ciel`.
 
 ## Quick start
 
@@ -59,16 +59,17 @@ Do **not** use system `python` — only `librelane-manage` / `librelane-web` fro
 ```
 run.sh
 dev_run.sh
-database/           # PostgreSQL SQL (canonical schema)
+scripts/host-prep.sh  # git, curl, and free-disk preflight
+database/             # PostgreSQL SQL (canonical schema)
 devops/flake.nix
 devops/web-shell.nix
-backend/            # Django API
-frontend/           # Next.js TypeScript UI
+backend/              # Django API
+frontend/             # Next.js TypeScript UI
 ```
 
 ## Troubleshooting
 
-**First run** — Nix downloads pre-built packages from `cache.nixos.org` and `nix-cache.fossi-foundation.org`. Then `./run.sh` starts project Postgres, applies `database/*.sql`, downloads the sky130 PDK (~1 GB) into `~/.ciel`, and starts Django + Next.js. Wait for `PDK ready.` in the terminal.
+**First run** — Nix downloads pre-built packages from `cache.nixos.org` and `nix-cache.fossi-foundation.org`. Then `./run.sh` starts project Postgres, applies `database/*.sql`, downloads sky130, gf180mcu, and ihp-sg13g2 into `~/.ciel`, and starts Django + Next.js. Wait for `PDKs ready.` in the terminal.
 
 **Setup PDK failed in the web UI** — The PDK must finish downloading during `./run.sh` startup first. Restart with `./dev_run.sh`, wait for `PDK ready.`, then click Setup PDK again.
 

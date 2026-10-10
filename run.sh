@@ -2,8 +2,10 @@
 # =============================================================================
 # run.sh — Auto setup-or-start for LibreLane web (Linux / macOS / WSL)
 #
-# Host bootstrap: curl (static if missing) + Nix (official installer).
-# Python, Django, LibreLane, and EDA tools come from devops/flake.nix (nixpkgs + FOSSi cache).
+# Host bootstrap (scripts/host-prep.sh): git + curl via the distro package
+# manager (static curl if that cannot run), free-disk check, git work-tree
+# repair, then Nix. Python, Django, LibreLane, and EDA tools come from
+# devops/flake.nix (nixpkgs + FOSSi cache).
 #
 # Usage:
 #   ./run.sh                # Postgres + Django API (:8000) + Next.js UI (:3000)
@@ -43,10 +45,17 @@ BOOTSTRAP_DIR="${SCRIPT_DIR}/.librelane-bootstrap"
 BOOTSTRAP_BIN="${BOOTSTRAP_DIR}/bin"
 LIBRELANE_DATA="${SCRIPT_DIR}/.librelane-data"
 FLAKE_DIR="${SCRIPT_DIR}/devops"
+sanitize_shell_file "${SCRIPT_DIR}/scripts/host-prep.sh"
+# shellcheck source=scripts/host-prep.sh
+. "${SCRIPT_DIR}/scripts/host-prep.sh"
 CURL_STATIC_VERSION="8.20.0"
 # Pin a Nix that still supports flakes. Latest 2.35.x crashes in non-TTY / WSL
-# installs (ioctl PTY + NIX_BECOME abort).
+# installs (ioctl PTY + NIX_BECOME abort). An older install is upgraded or
+# replaced; a newer one is kept when it can read flake.lock (version 7, Nix >= 2.18).
 NIX_INSTALL_URL="https://releases.nixos.org/nix/nix-2.24.12/install"
+NIX_MIN_MAJOR=2
+NIX_MIN_MINOR=18
+NIX_MIN_PATCH=0
 SYSTEM_CACHE_ROOT="${XDG_CACHE_HOME:-${HOME}/.cache}/librelane-web"
 SYSTEM_CACHE=""
 SYSTEM_PROFILE=""
@@ -57,6 +66,7 @@ SYSTEM_LOCK=""
 FORCE_SETUP=false
 PREP_ONLY=false
 DO_LAUNCH=false
+RUN_SH_ARGS=()
 FRONTEND_BUILD=false
 CLEANING_UP=false
 INTERRUPTED=false
@@ -69,7 +79,27 @@ STARTED_POSTGRES=false
 for arg in "$@"; do
     case "$arg" in
         --help|-h)
-            sed -n '3,20p' "$0" | sed 's/^# //'
+            cat <<'EOF'
+LibreLane web — setup or start (Linux / macOS / WSL).
+
+  ./run.sh              Postgres + Django API (:8000) + Next.js UI (:3000)
+  ./run.sh --force-setup
+  ./run.sh --prep-only  Nix env, database schema, PDKs, and data dir
+  ./run.sh --build      production Next.js build + next start
+
+Missing git and curl are installed with the distro package manager
+(Homebrew on macOS). If curl still cannot be installed, a static binary
+is downloaded. Nix is installed when it is missing. An existing Nix older than 2.18, or a
+store written by a different Nix, is upgraded or replaced with 2.24.12.
+A newer Nix that works is left in place.
+
+sudo ./run.sh continues as the user who invoked sudo.
+
+First run wants about 12 GiB free when the Nix store and PDKs share a
+disk. Later runs keep at least 5 GiB free for flow data. Override with
+LIBRELANE_INSTALL_FREE_BYTES, LIBRELANE_NIX_FREE_BYTES,
+LIBRELANE_PDK_FREE_BYTES, or LIBRELANE_MIN_FREE_BYTES.
+EOF
             exit 0 ;;
         --__launch)    DO_LAUNCH=true ;;
         --force-setup) FORCE_SETUP=true ;;
@@ -94,6 +124,8 @@ source_nix_profile() {
 }
 
 enable_flakes() {
+    # A previous nix-channel must not replace the locked nixpkgs.
+    export NIX_PATH=""
     # Pre-built EDA tools from FOSSi + nixpkgs binary caches (no source/.deb builds).
     export NIX_CONFIG="${NIX_CONFIG:-}
 experimental-features = nix-command flakes
@@ -105,21 +137,16 @@ warn-dirty = false
 }
 
 nix_cmd() {
-    nix --accept-flake-config "$@"
+    "${NIX_BIN:-nix}" --accept-flake-config "$@"
 }
 
 file_hash() {
-    local f="$1"
-    if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "${f}" | awk '{print $1}'
-    elif command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 "${f}" | awk '{print $1}'
-    elif command -v openssl >/dev/null 2>&1; then
-        openssl dgst -sha256 "${f}" | awk '{print $NF}'
-    else
+    local f="$1" sum
+    if ! sum="$(host_file_hash "${f}")"; then
         error "Need sha256sum, shasum, or openssl to cache the Nix env."
         return 1
     fi
+    printf '%s\n' "${sum}"
 }
 
 init_system_cache_paths() {
@@ -200,7 +227,7 @@ nix_env_ready() {
 
     command -v nix >/dev/null 2>&1 || return 1
     command -v curl >/dev/null 2>&1 || return 1
-    nix flake --help >/dev/null 2>&1 || return 1
+    "${NIX_BIN:-nix}" flake --help >/dev/null 2>&1 || return 1
     [ -f "${FLAKE_DIR}/flake.nix" ] || return 1
     [ -n "${SYSTEM_READY}" ] && [ -f "${SYSTEM_READY}" ] || return 1
     [ -e "${SYSTEM_PROFILE}" ] || return 1
@@ -210,13 +237,7 @@ nix_env_ready() {
 }
 
 http_get() {
-    local url="$1" dest="$2"
-    if command -v curl >/dev/null 2>&1; then
-        curl -fsSL --proto '=https' --tlsv1.2 -o "${dest}" "${url}"
-    else
-        error "Cannot download ${url}: curl is required (bootstrap)."
-        return 1
-    fi
+    host_http_get "$@"
 }
 
 extract_tar_xz() {
@@ -262,7 +283,7 @@ ensure_curl() {
         return 0
     fi
 
-    step "curl not found — installing static binary (no OS package manager) ..."
+    step "curl not found — downloading a static binary ..."
     local asset url archive extract_dir found
     asset="$(static_curl_asset)" || exit 1
     url="https://github.com/stunnel/static-curl/releases/download/${CURL_STATIC_VERSION}/${asset}"
@@ -285,6 +306,36 @@ ensure_curl() {
     rm -rf "${extract_dir}" "${archive}"
     prepend_bootstrap_path
     info "curl installed (static): $(curl --version 2>/dev/null | head -1)"
+}
+
+# Distro packages first (git + curl). Static curl covers hosts with no
+# package manager. A git checkout still needs git itself.
+ensure_bootstrap_tools() {
+    local had_git=0 had_curl=0
+    command -v git >/dev/null 2>&1 && had_git=1
+    command -v curl >/dev/null 2>&1 && had_curl=1
+    if [ "${had_git}" -eq 1 ] && [ "${had_curl}" -eq 1 ]; then
+        return 0
+    fi
+    host_ensure_git_and_curl \
+        || warn "Could not install missing git/curl with the system package manager."
+    if ! command -v curl >/dev/null 2>&1; then
+        ensure_curl
+    elif [ "${had_curl}" -eq 0 ]; then
+        info "curl: $(curl --version 2>/dev/null | head -1)"
+    fi
+    if ! command -v git >/dev/null 2>&1; then
+        if [ -e "${SCRIPT_DIR}/.git" ]; then
+            error "This checkout is a Git work tree, but git is not installed."
+            error "Install git and run ./run.sh again."
+            exit 1
+        fi
+        warn "git is not installed. Nix can still download flake inputs; local Git checks are skipped."
+        return 0
+    fi
+    if [ "${had_git}" -eq 0 ]; then
+        info "git: $(git --version 2>/dev/null | head -1)"
+    fi
 }
 
 nix_present() {
@@ -443,35 +494,106 @@ run_with_pty() {
     "$@"
 }
 
-remove_incomplete_nix() {
-    if nix_present; then
-        return 0
+nix_activate_bin() {
+    local bin="$1" dir
+    NIX_BIN="${bin}"
+    export NIX_BIN
+    dir="$(dirname "${bin}")"
+    case ":${PATH}:" in
+        *":${dir}:"*) ;;
+        *) export PATH="${dir}:${PATH}" ;;
+    esac
+    hash -r 2>/dev/null || true
+}
+
+# Drop a previous Nix (any version) so the pinned installer can run.
+# NixOS keeps /nix; that store belongs to the system generation.
+nix_remove_previous() {
+    local u f
+    if host_is_nixos; then
+        error "This is NixOS. Refusing to delete /nix."
+        error "Upgrade Nix with the system: sudo nixos-rebuild switch"
+        return 1
     fi
-    if [ ! -e /nix ] && [ ! -e "${HOME}/.nix-profile" ]; then
-        return 0
+    info "Removing the previous Nix installation."
+    if command -v systemctl >/dev/null 2>&1; then
+        host_as_root systemctl stop nix-daemon.socket nix-daemon.service >/dev/null 2>&1 || true
+        host_as_root systemctl disable nix-daemon.socket nix-daemon.service >/dev/null 2>&1 || true
+        host_as_root systemctl daemon-reload >/dev/null 2>&1 || true
     fi
-    warn "Previous Nix install did not finish — clearing the incomplete tree"
-    if [ "$(id -u)" -eq 0 ] || { [ -e /nix ] && [ -O /nix ]; } || { [ -e /nix ] && [ -w /nix ]; }; then
-        rm -rf /nix "${HOME}/.nix-profile" "${HOME}/.nix-defexpr" "${HOME}/.nix-channels" \
-            /etc/nix 2>/dev/null || true
-        rm -f /etc/profile.d/nix.sh /etc/profile.d/nix-daemon.sh 2>/dev/null || true
+    for f in /etc/bashrc /etc/bash.bashrc /etc/profile /etc/zsh/zshrc /etc/zshrc; do
+        if [ -f "${f}.backup-before-nix" ]; then
+            host_as_root cp -a "${f}.backup-before-nix" "${f}" || true
+        fi
+    done
+    host_as_root rm -rf \
+        /nix \
+        /etc/nix \
+        /etc/profile.d/nix.sh \
+        /etc/profile.d/nix-daemon.sh \
+        /etc/tmpfiles.d/nix-daemon.conf \
+        /usr/lib/systemd/system/nix-daemon.service \
+        /usr/lib/systemd/system/nix-daemon.socket \
+        /etc/systemd/system/nix-daemon.service \
+        /etc/systemd/system/nix-daemon.socket \
+        /root/.nix-profile /root/.nix-defexpr /root/.nix-channels \
+        /root/.local/state/nix /root/.cache/nix \
+        || return 1
+    rm -rf \
+        "${HOME:-}/.nix-profile" "${HOME:-}/.nix-defexpr" "${HOME:-}/.nix-channels" \
+        "${HOME:-}/.local/state/nix" "${HOME:-}/.cache/nix" \
+        "${HOME:-}/.config/nix"
+    if command -v getent >/dev/null 2>&1 && getent group nixbld >/dev/null 2>&1; then
+        while IFS= read -r u; do
+            [ -n "${u}" ] || continue
+            host_as_root userdel "${u}" >/dev/null 2>&1 || true
+        done < <(getent passwd | awk -F: '$1 ~ /^nixbld[0-9]+$/ { print $1 }')
+        host_as_root groupdel nixbld >/dev/null 2>&1 || true
+    fi
+    if command -v getent >/dev/null 2>&1 && getent group nix-daemon >/dev/null 2>&1; then
+        host_as_root groupdel nix-daemon >/dev/null 2>&1 || true
+    fi
+    hash -r 2>/dev/null || true
+    unset NIX_BIN || true
+}
+
+nix_reload_bin() {
+    local best
+    hash -r 2>/dev/null || true
+    source_nix_profile || true
+    enable_flakes
+    if ! best="$(host_nix_select_bin)"; then
+        error "Nix install finished, but the nix command is still missing."
+        return 1
+    fi
+    nix_activate_bin "${best}"
+}
+
+nix_try_upgrade() {
+    info "Upgrading the installed Nix to ${NIX_MIN_MAJOR}.${NIX_MIN_MINOR} or newer."
+    if [ -S /nix/var/nix/daemon-socket/socket ]; then
+        host_as_root "${NIX_BIN}" --extra-experimental-features "nix-command flakes" upgrade-nix
+        if command -v systemctl >/dev/null 2>&1; then
+            host_as_root systemctl restart nix-daemon.socket nix-daemon.service >/dev/null 2>&1 || true
+        fi
     else
-        error "Incomplete Nix files in /nix but this user cannot remove them."
-        error "As root run:  rm -rf /nix ~/.nix-profile ~/.nix-defexpr ~/.nix-channels"
-        error "Then re-run ./run.sh"
-        exit 1
+        "${NIX_BIN}" --extra-experimental-features "nix-command flakes" upgrade-nix
     fi
 }
 
-ensure_nix() {
-    if nix_present; then
-        info "Nix: $(nix --version 2>/dev/null || true)"
-        return 0
+nix_install_pinned() {
+    local installer flags mode
+    if host_is_nixos; then
+        error "Nix is not available on this NixOS system."
+        error "Boot a generation that includes nix, then run ./run.sh again."
+        return 1
     fi
-
-    step "Nix not found — installing via official installer (no OS package manager) ..."
     ensure_curl
-    remove_incomplete_nix
+    if [ "${NIX_REPLACE:-}" = "1" ]; then
+        nix_remove_previous || return 1
+    elif ! nix_present && { [ -e /nix ] || [ -e "${HOME}/.nix-profile" ]; }; then
+        nix_remove_previous || return 1
+    fi
 
     export USER="${USER:-$(id -un 2>/dev/null || echo root)}"
     local tmp="${TMPDIR:-/tmp}"
@@ -480,17 +602,18 @@ ensure_nix() {
         *) tmp="${tmp}/" ;;
     esac
     export TMPDIR="${tmp}"
+    export NIX_INSTALLER_YES=1
+    export NIX_INSTALLER_NO_CHANNEL_ADD=1
 
     mkdir -p "${BOOTSTRAP_DIR}/tmp"
-    local installer flags mode
     installer="${BOOTSTRAP_DIR}/tmp/nix-installer.sh"
-    http_get "${NIX_INSTALL_URL}" "${installer}" || exit 1
+    http_get "${NIX_INSTALL_URL}" "${installer}" || return 1
     chmod +x "${installer}"
 
     mode="$(detect_nix_install_mode)"
     case "${mode}" in
-        daemon) flags="--daemon --yes" ;;
-        *) flags="--no-daemon --yes" ;;
+        daemon) flags="--daemon --yes --no-channel-add" ;;
+        *) flags="--no-daemon --yes --no-channel-add" ;;
     esac
     explain_nix_install_choice "${mode}"
     info "Nix installer flags: ${flags}"
@@ -498,29 +621,339 @@ ensure_nix() {
     if ! run_with_pty sh "${installer}" ${flags}; then
         if [ "${mode}" = "daemon" ]; then
             warn "Daemon install failed — retrying single-user (--no-daemon)"
-            remove_incomplete_nix
-            if ! run_with_pty sh "${installer}" --no-daemon --yes; then
+            nix_remove_previous || return 1
+            if ! run_with_pty sh "${installer}" --no-daemon --yes --no-channel-add; then
                 error "Nix installer failed. If /nix was left behind, remove it and re-run."
-                exit 1
+                return 1
             fi
         else
-            error "Nix installer failed. If /nix was left behind, remove it and re-run."
-            exit 1
+            warn "Nix installer failed. Removing the previous tree and retrying once."
+            nix_remove_previous || return 1
+            # shellcheck disable=SC2086
+            if ! run_with_pty sh "${installer}" ${flags}; then
+                error "Nix installer failed. If /nix was left behind, remove it and re-run."
+                return 1
+            fi
+        fi
+    fi
+    rm -f "${installer}"
+    hash -r 2>/dev/null || true
+    source_nix_profile || true
+    if ! nix_present && ! host_nix_select_bin >/dev/null 2>&1; then
+        error "Nix installed but not on PATH. Open a new terminal and re-run."
+        return 1
+    fi
+    nix_reload_bin || return 1
+    info "Nix installed: $("${NIX_BIN}" --version 2>/dev/null || true)"
+}
+
+nix_replace_and_recheck() {
+    if [ "${NIX_REPAIR:-}" = "1" ]; then
+        error "Nix is still not usable after replacing the previous install."
+        return 1
+    fi
+    export NIX_REPAIR=1
+    export NIX_REPLACE=1
+    step "Replacing this Nix with the pinned 2.24.12 installer."
+    nix_install_pinned || return 1
+    nix_reload_bin || return 1
+    nix_check_existing
+}
+
+# Start a stopped daemon, or re-enter as a member of nix-daemon.
+# Returns 0 when the caller should run the Nix check again.
+nix_revive_store() {
+    local msg="$1" members a quoted
+    case "${msg}" in
+        *daemon*|*socket*|*Connection\ refused*|*disconnected*)
+            if command -v systemctl >/dev/null 2>&1; then
+                info "Starting the Nix daemon from the previous install."
+                host_as_root systemctl start nix-daemon.socket nix-daemon.service >/dev/null 2>&1 || true
+                return 0
+            fi
+            ;;
+    esac
+    case "${msg}" in
+        *Permission\ denied*|*Operation\ not\ permitted*|*not\ allowed*)
+            if [ "${NIX_SG:-}" = "1" ]; then
+                return 1
+            fi
+            if command -v getent >/dev/null 2>&1 && getent group nix-daemon >/dev/null 2>&1; then
+                members="$(getent group nix-daemon | awk -F: '{ print $4 }')"
+                case ",${members}," in
+                    *",${USER},"*) ;;
+                    *)
+                        info "Adding ${USER} to the nix-daemon group."
+                        host_as_root usermod -aG nix-daemon "${USER}" || return 1
+                        ;;
+                esac
+                if command -v sg >/dev/null 2>&1; then
+                    info "Opening the Nix store as a member of nix-daemon."
+                    export NIX_SG=1
+                    quoted=""
+                    if [ "${#RUN_SH_ARGS[@]}" -gt 0 ]; then
+                        for a in "${RUN_SH_ARGS[@]}"; do
+                            quoted="${quoted} $(printf '%q' "${a}")"
+                        done
+                    fi
+                    exec sg nix-daemon -c "cd $(printf '%q' "${SCRIPT_DIR}") && exec $(printf '%q' "${SCRIPT_DIR}/run.sh")${quoted}"
+                fi
+            fi
+            ;;
+    esac
+    return 1
+}
+
+nix_foreign_channel() {
+    local url="" ver="" f
+    if command -v nix-channel >/dev/null 2>&1; then
+        url="$(nix-channel --list 2>/dev/null | awk '$1=="nixpkgs" || $1=="nixos" { print $2; exit }' || true)"
+    fi
+    for f in \
+        "${HOME:-}/.nix-defexpr/channels/nixpkgs/.version" \
+        "/nix/var/nix/profiles/per-user/${USER:-}/channels/nixpkgs/.version" \
+        "/nix/var/nix/profiles/per-user/root/channels/nixpkgs/.version"
+    do
+        [ -f "${f}" ] || continue
+        ver="$(tr -d '[:space:]' < "${f}" || true)"
+        [ -n "${ver}" ] && break
+    done
+    if [ -z "${url}" ] && [ -z "${ver}" ]; then
+        return 0
+    fi
+    if [[ "${url}" =~ nixos-25\.05([^0-9]|$) ]]; then
+        return 0
+    fi
+    if [ -z "${url}" ] && [[ "${ver}" =~ ^25\.05([^0-9]|$) ]]; then
+        return 0
+    fi
+    if [ -n "${url}" ] && [ -n "${ver}" ]; then
+        printf '%s (checkout %s)\n' "${url}" "${ver}"
+    elif [ -n "${url}" ]; then
+        printf '%s\n' "${url}"
+    else
+        printf 'checkout %s\n' "${ver}"
+    fi
+}
+
+nix_store_error() {
+    local msg="$1" line
+    error "Nix is installed, but the existing store cannot be used."
+    while IFS= read -r line; do
+        [ -n "${line}" ] || continue
+        error "${line}"
+    done <<EOF
+$(printf '%s\n' "${msg}" | head -n 6)
+EOF
+    case "${msg}" in
+        *experimental*feature*|*flakes*)
+            error "This run sets experimental-features in NIX_CONFIG. If that is overridden, add to nix.conf:"
+            error "  experimental-features = nix-command flakes"
+            ;;
+        *daemon*|*socket*|*Connection\ refused*|*disconnected*)
+            error "Start the Nix daemon:  sudo systemctl start nix-daemon"
+            error "If this user was just added to the nix-daemon group, log out and back in."
+            ;;
+        *Permission\ denied*|*Operation\ not\ permitted*|*not\ allowed*)
+            error "This user cannot access the store from the previous Nix install."
+            error "Multi-user Nix: add the user to nix-daemon and log in again."
+            error "Single-user Nix: run as the user who originally installed Nix."
+            ;;
+        *database*|*schema*|*not\ compatible*)
+            error "The Nix database was written by a different Nix version."
+            error "Re-run ./run.sh to replace it with Nix 2.24.12, or upgrade Nix so it matches that database."
+            ;;
+        *)
+            error "Re-run ./run.sh after the previous Nix is removed, or reinstall from ${NIX_INSTALL_URL}"
+            ;;
+    esac
+}
+
+nix_expected_system() {
+    local os arch cpu sys
+    os="$(uname -s)"
+    arch="$(uname -m)"
+    case "${os}" in
+        Linux) sys="linux" ;;
+        Darwin) sys="darwin" ;;
+        *) return 1 ;;
+    esac
+    case "${arch}" in
+        x86_64|amd64) cpu="x86_64" ;;
+        aarch64|arm64) cpu="aarch64" ;;
+        *) return 1 ;;
+    esac
+    printf '%s-%s\n' "${cpu}" "${sys}"
+}
+
+# Previous Nix: too old for flake.lock, a different store schema, or a
+# daemon left behind by an earlier install. A newer working Nix is kept.
+nix_check_existing() {
+    local first best maj min pat channel err json url sver
+    local smaj smin sys feats store_msg expected
+
+    source_nix_profile || true
+    enable_flakes
+    first="$(command -v nix 2>/dev/null || true)"
+    if ! best="$(host_nix_select_bin)"; then
+        if [ "${NIX_REPAIR:-}" = "1" ]; then
+            error "Nix binaries still do not run after reinstall."
+            return 1
+        fi
+        info "The Nix binary on this machine does not run. Replacing it."
+        nix_replace_and_recheck || return 1
+        return 0
+    fi
+    nix_activate_bin "${best}"
+    if [ -n "${first}" ] && [ "${first}" != "${best}" ]; then
+        info "Using ${best} (newer Nix than ${first})."
+    fi
+
+    if ! read -r maj min pat < <(host_nix_parse_version "${NIX_BIN}"); then
+        if [ "${NIX_REPAIR:-}" = "1" ]; then
+            error "Nix at ${NIX_BIN} still does not report a version."
+            return 1
+        fi
+        info "Nix at ${NIX_BIN} did not report a version. Replacing it."
+        nix_replace_and_recheck || return 1
+        return 0
+    fi
+
+    channel="$(nix_foreign_channel || true)"
+    if ! host_nix_ver_ge "${maj}" "${min}" "${pat}" \
+        "${NIX_MIN_MAJOR}" "${NIX_MIN_MINOR}" "${NIX_MIN_PATCH}"; then
+        if [ "${NIX_REPAIR:-}" = "1" ]; then
+            error "Nix ${maj}.${min}.${pat} is still older than Nix ${NIX_MIN_MAJOR}.${NIX_MIN_MINOR} after reinstall."
+            return 1
+        fi
+        info "Nix ${maj}.${min}.${pat} is older than Nix ${NIX_MIN_MAJOR}.${NIX_MIN_MINOR} (flake.lock version 7)."
+        if [ -n "${channel}" ]; then
+            info "Existing nixpkgs channel: ${channel}"
+        fi
+        if [ "${NIX_UPGRADED:-}" != "1" ]; then
+            export NIX_UPGRADED=1
+            if nix_try_upgrade; then
+                nix_reload_bin || return 1
+                nix_check_existing || return 1
+                return 0
+            fi
+        fi
+        info "Upgrade failed. Replacing this Nix install with 2.24.12."
+        nix_replace_and_recheck || return 1
+        return 0
+    fi
+
+    if [ -n "${channel}" ]; then
+        warn "A previous nixpkgs channel is ${channel}."
+        warn "That channel is outside NixOS 25.05. This run ignores it."
+        warn "Packages come from devops/flake.lock (github:NixOS/nixpkgs/nixos-25.05)."
+    fi
+
+    err="${TMPDIR:-/tmp}/librelane-nix-check.$$"
+    json="$("${NIX_BIN}" store info --json 2>"${err}" || true)"
+    if [ -z "${json}" ]; then
+        json="$("${NIX_BIN}" store ping --json 2>"${err}" || true)"
+    fi
+    if [ -z "${json}" ]; then
+        store_msg="$(cat "${err}" 2>/dev/null || true)"
+        rm -f "${err}"
+        if [ "${NIX_STORE_RETRY:-}" != "1" ]; then
+            export NIX_STORE_RETRY=1
+            if nix_revive_store "${store_msg}"; then
+                nix_check_existing || return 1
+                return 0
+            fi
+        fi
+        if [ "${NIX_REPAIR:-}" != "1" ]; then
+            info "The existing Nix store is unusable. Installing Nix 2.24.12."
+            nix_replace_and_recheck || return 1
+            return 0
+        fi
+        nix_store_error "${store_msg}"
+        return 1
+    fi
+    rm -f "${err}"
+
+    url="$(printf '%s' "${json}" | sed -n 's/.*"url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+    sver="$(printf '%s' "${json}" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+    if [[ "${sver}" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
+        smaj="${BASH_REMATCH[1]}"
+        smin="${BASH_REMATCH[2]}"
+        if [ "${smaj}" != "${maj}" ] || [ "${smin}" != "${min}" ]; then
+            if [ "${NIX_REPAIR:-}" = "1" ]; then
+                error "Nix client ${maj}.${min}.${pat} still does not match the store (${sver})."
+                return 1
+            fi
+            info "Nix client ${maj}.${min}.${pat} does not match the store (${sver}). Replacing Nix."
+            nix_replace_and_recheck || return 1
+            return 0
         fi
     fi
 
-    hash -r 2>/dev/null || true
-    source_nix_profile || true
-    if ! nix_present; then
-        error "Nix installed but not on PATH. Open a new terminal and re-run."
-        exit 1
+    if [ -S /nix/var/nix/daemon-socket/socket ] && [[ "${url}" != daemon* ]]; then
+        warn "A Nix daemon socket exists, but ${NIX_BIN} is using a local store."
+        warn "A single-user Nix and a multi-user Nix are both installed."
     fi
-    info "Nix installed: $(nix --version)"
+
+    if [[ "${url}" == daemon* ]] && ! grep -q '^nixbld1:' /etc/passwd 2>/dev/null; then
+        if [ "${NIX_REPAIR:-}" = "1" ]; then
+            error "The Nix daemon still has no nixbld build users."
+            return 1
+        fi
+        info "The Nix daemon has no nixbld build users. Replacing Nix."
+        nix_replace_and_recheck || return 1
+        return 0
+    fi
+
+    if ! "${NIX_BIN}" flake --help >/dev/null 2>&1; then
+        if [ "${NIX_REPAIR:-}" = "1" ]; then
+            error "Nix ${maj}.${min}.${pat} still cannot run flakes."
+            return 1
+        fi
+        info "Nix ${maj}.${min}.${pat} cannot run flakes. Replacing it."
+        nix_replace_and_recheck || return 1
+        return 0
+    fi
+
+    sys="$("${NIX_BIN}" config show system 2>/dev/null || true)"
+    expected="$(nix_expected_system 2>/dev/null || true)"
+    if [ -n "${sys}" ] && [ -n "${expected}" ] && [ "${sys}" != "${expected}" ]; then
+        error "Nix is configured for system ${sys}. This machine is ${expected}."
+        error "Fix the system setting in /etc/nix/nix.conf or ~/.config/nix/nix.conf."
+        return 1
+    fi
+
+    if [ "$("${NIX_BIN}" config show restrict-eval 2>/dev/null || true)" = "true" ]; then
+        error "Nix restrict-eval is enabled, so this flake cannot fetch NixOS 25.05."
+        error "Set restrict-eval = false in the Nix configuration and retry."
+        return 1
+    fi
+
+    feats="$("${NIX_BIN}" config show experimental-features 2>/dev/null || true)"
+    if ! printf '%s' "${feats}" | grep -q 'flakes' \
+        || ! printf '%s' "${feats}" | grep -q 'nix-command'; then
+        warn "nix.conf does not list flakes. This run enables them with NIX_CONFIG."
+    fi
+
+    info "Nix ${maj}.${min}.${pat}"
+    return 0
+}
+
+ensure_nix() {
+    source_nix_profile || true
+    enable_flakes
+    if nix_present || host_nix_select_bin >/dev/null 2>&1; then
+        nix_check_existing || exit 1
+        return 0
+    fi
+    step "Nix not found — installing Nix 2.24.12 (no OS package manager) ..."
+    nix_install_pinned || exit 1
+    nix_check_existing || exit 1
 }
 
 ensure_flakes() {
     enable_flakes
-    if ! nix flake --help >/dev/null 2>&1; then
+    if ! "${NIX_BIN:-nix}" flake --help >/dev/null 2>&1; then
         error "This Nix build does not support flakes. Upgrade Nix, then re-run."
         exit 1
     fi
@@ -589,7 +1022,7 @@ realize_nix_shell() {
 
 setup_first_time() {
     step "First-time (or incomplete) setup — preparing LibreLane Nix environment ..."
-    ensure_curl
+    ensure_bootstrap_tools
     ensure_nix
     ensure_flakes
     ensure_flake_lock
@@ -612,15 +1045,46 @@ dir_chmod_0700_works() {
 }
 
 choose_librelane_data() {
-    # Prefer project-local data; on /mnt/* use ~/.local/share for Postgres sockets.
+    # Postgres requires a directory whose mode stays 0700. Windows mounts
+    # (/mnt/* and some network filesystems) ignore chmod, so those use
+    # ~/.local/share instead of the checkout.
+    if [ "${DATA_DIR_PICKED:-false}" = true ]; then
+        return 0
+    fi
+    local project fallback
+    project="${SCRIPT_DIR}/.librelane-data"
+    fallback="${HOME}/.local/share/librelane-web"
+
+    if [ -n "${LIBRELANE_DATA_DIR:-}" ]; then
+        LIBRELANE_DATA="${LIBRELANE_DATA_DIR}"
+        if ! dir_chmod_0700_works "${LIBRELANE_DATA}"; then
+            warn "LIBRELANE_DATA_DIR=${LIBRELANE_DATA} does not keep mode 0700. Postgres may refuse to start."
+        fi
+        DATA_DIR_PICKED=true
+        return 0
+    fi
+
     case "${SCRIPT_DIR}" in
         /mnt/*)
-            LIBRELANE_DATA="${HOME}/.local/share/librelane-web"
+            info "Repo is on a Windows mount — Postgres data will live in ${fallback}"
+            LIBRELANE_DATA="${fallback}"
             ;;
         *)
-            LIBRELANE_DATA="${SCRIPT_DIR}/.librelane-data"
+            if dir_chmod_0700_works "${project}"; then
+                LIBRELANE_DATA="${project}"
+                DATA_DIR_PICKED=true
+                return 0
+            fi
+            warn "Cannot use mode 0700 on ${project}. Postgres data will live in ${fallback}"
+            LIBRELANE_DATA="${fallback}"
             ;;
     esac
+    if ! dir_chmod_0700_works "${LIBRELANE_DATA}"; then
+        error "Data directory ${LIBRELANE_DATA} does not accept mode 0700."
+        error "Set LIBRELANE_DATA_DIR to a Linux filesystem."
+        exit 1
+    fi
+    DATA_DIR_PICKED=true
 }
 
 export_runtime_env() {
@@ -1188,6 +1652,8 @@ start_frontend() {
 launch_stack() {
     prefer_unix_path
     export_runtime_env
+    # Nix may have filled the store since the outer check. Fail before Postgres.
+    host_check_free_space true || exit 1
     trap 'INTERRUPTED=true; shutdown_stack' INT
     trap 'INTERRUPTED=true; shutdown_stack' TERM
     trap shutdown_stack EXIT
@@ -1248,7 +1714,21 @@ main() {
         exit 0
     fi
 
+    RUN_SH_ARGS=("$@")
+    host_rerun_as_desktop_user "${SCRIPT_DIR}/run.sh" "$@" || exit 1
+    check_host_os || exit 1
     init_system_cache_paths
+    export_runtime_env
+    ensure_bootstrap_tools
+    host_prepare_git "${SCRIPT_DIR}" true || exit 1
+    # --force-setup deletes the Nix marker; budget the download before that work.
+    if [ "${FORCE_SETUP}" = true ]; then
+        invalidate_system_nix_cache
+    fi
+    host_check_free_space || exit 1
+    # Also when the dev env is already cached: an older or mismatched Nix
+    # must be upgraded or replaced before nix develop.
+    ensure_nix
 
     if [ "${FORCE_SETUP}" = true ]; then
         invalidate_system_nix_cache
