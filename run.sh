@@ -1143,14 +1143,46 @@ check_host_os() {
 }
 
 realize_nix_shell() {
+    local develop_err
     mkdir -p "${SYSTEM_CACHE}"
+    develop_err="${SYSTEM_CACHE}/develop.err"
+    # The installer text says to open a new terminal. This process already
+    # loaded the Nix profile, so the fetch continues here.
+    source_nix_profile || true
+    enable_flakes
+    info "Nix is loaded in this terminal. No new shell is required."
     step "Fetching Nix packages into the system cache (once per machine / flake) ..."
-    local develop_err="${SYSTEM_CACHE}/develop.err"
+    info "This download is large. A status line is printed every 20 seconds until it finishes."
+
+    # Show Nix output as it happens, and keep a copy for the lock-file check.
+    # A heartbeat keeps the terminal from looking frozen when Nix is quiet.
+    nix_run_visible() {
+        local log="$1"
+        shift
+        local beat=0 st=0
+        : > "${log}"
+        (
+            while true; do
+                sleep 20
+                info "Still fetching Nix packages ($(date -u +%H:%M:%S)). Leave this terminal open."
+            done
+        ) &
+        beat=$!
+        set +e
+        "$@" 2>&1 | tee -a "${log}"
+        st=$?
+        set -e
+        kill "${beat}" 2>/dev/null || true
+        wait "${beat}" 2>/dev/null || true
+        return "${st}"
+    }
     nix_develop_locked() {
-        nix_cmd develop "${FLAKE_DIR}" \
+        nix_run_visible "${develop_err}" \
+            nix_cmd develop "${FLAKE_DIR}" \
             --profile "${SYSTEM_PROFILE}" \
+            --print-build-logs \
             --no-update-lock-file \
-            --command true 2>"${develop_err}"
+            --command true
     }
     if ! nix_develop_locked; then
         if flake_lock_rejected "${develop_err}"; then
@@ -1160,9 +1192,11 @@ realize_nix_shell() {
                     # A dirty git checkout is fetched as git+file://. Nix 2.35 can
                     # still insist on writing the lock during that fetch.
                     warn "Nix still wants to write flake.lock. Allowing that for this fetch."
-                    nix_cmd develop "${FLAKE_DIR}" \
+                    nix_run_visible "${develop_err}" \
+                        nix_cmd develop "${FLAKE_DIR}" \
                         --profile "${SYSTEM_PROFILE}" \
-                        --command true 2>"${develop_err}" \
+                        --print-build-logs \
+                        --command true \
                         || { cat "${develop_err}" >&2; exit 1; }
                     cp -f "${FLAKE_DIR}/flake.lock" "${SYSTEM_LOCK}"
                 else
