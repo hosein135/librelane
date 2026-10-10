@@ -549,6 +549,7 @@ host_install_host_packages() {
                 case "${p}" in
                     git) atoms+=(dev-vcs/git) ;;
                     curl) atoms+=(net-misc/curl) ;;
+                    xz) atoms+=(app-arch/xz-utils) ;;
                     *) atoms+=("${p}") ;;
                 esac
             done
@@ -604,12 +605,24 @@ host_refresh_tool_path() {
     hash -r 2>/dev/null || true
 }
 
-# Install whichever of git and curl is missing. Returns 1 when the package
-# manager cannot do it; the caller may still fetch a static curl.
-host_ensure_git_and_curl() {
-    local tool pm pretty
-    local -a missing=() still=()
-    for tool in git curl; do
+# Command name -> distro package. Debian's xz binary is in xz-utils.
+host_package_name() {
+    local pm="$1" tool="$2"
+    case "${pm}:${tool}" in
+        apt:xz) printf '%s\n' xz-utils ;;
+        emerge:git) printf '%s\n' dev-vcs/git ;;
+        emerge:curl) printf '%s\n' net-misc/curl ;;
+        emerge:xz) printf '%s\n' app-arch/xz-utils ;;
+        *) printf '%s\n' "${tool}" ;;
+    esac
+}
+
+# Install whichever of the named commands is missing. Returns 1 when the
+# package manager cannot do it.
+host_ensure_commands() {
+    local tool pm pretty pkg
+    local -a missing=() pkgs=() still=()
+    for tool in "$@"; do
         if ! command -v "${tool}" >/dev/null 2>&1; then
             missing+=("${tool}")
         fi
@@ -630,6 +643,10 @@ host_ensure_git_and_curl() {
             warn "No package manager found. Install ${missing[*]} and retry."
             return 1
         fi
+        for tool in "${missing[@]}"; do
+            pkg="$(host_package_name "${pm}" "${tool}")"
+            pkgs+=("${pkg}")
+        done
         pretty="$(host_os_release_value PRETTY_NAME || true)"
         if [ -n "${pretty}" ]; then
             info "Installing missing ${missing[*]} with ${pm} (${pretty})."
@@ -644,7 +661,7 @@ host_ensure_git_and_curl() {
                 fi
                 ;;
         esac
-        if ! host_install_host_packages "${pm}" "${missing[@]}"; then
+        if ! host_install_host_packages "${pm}" "${pkgs[@]}"; then
             warn "Could not install ${missing[*]} with ${pm}."
             return 1
         fi
@@ -662,6 +679,12 @@ host_ensure_git_and_curl() {
     fi
     info "Installed ${missing[*]}."
     return 0
+}
+
+# Install whichever of git and curl is missing. Returns 1 when the package
+# manager cannot do it; the caller may still fetch a static curl.
+host_ensure_git_and_curl() {
+    host_ensure_commands git curl
 }
 
 # curl, else wget, else python3. Used for the Nix installer and static curl.

@@ -331,28 +331,64 @@ ensure_bootstrap_tools() {
     local had_git=0 had_curl=0
     command -v git >/dev/null 2>&1 && had_git=1
     command -v curl >/dev/null 2>&1 && had_curl=1
-    if [ "${had_git}" -eq 1 ] && [ "${had_curl}" -eq 1 ]; then
-        return 0
-    fi
-    host_ensure_git_and_curl \
-        || warn "Could not install missing git/curl with the system package manager."
-    if ! command -v curl >/dev/null 2>&1; then
-        ensure_curl
-    elif [ "${had_curl}" -eq 0 ]; then
-        info "curl: $(curl --version 2>/dev/null | head -1)"
-    fi
-    if ! command -v git >/dev/null 2>&1; then
-        if [ -e "${SCRIPT_DIR}/.git" ]; then
-            error "This checkout is a Git work tree, but git is not installed."
-            error "Install git and run ./run.sh again."
-            exit 1
+    if [ "${had_git}" -eq 0 ] || [ "${had_curl}" -eq 0 ]; then
+        host_ensure_git_and_curl \
+            || warn "Could not install missing git/curl with the system package manager."
+        if ! command -v curl >/dev/null 2>&1; then
+            ensure_curl
+        elif [ "${had_curl}" -eq 0 ]; then
+            info "curl: $(curl --version 2>/dev/null | head -1)"
         fi
-        warn "git is not installed. Nix can still download flake inputs; local Git checks are skipped."
+        if ! command -v git >/dev/null 2>&1; then
+            if [ -e "${SCRIPT_DIR}/.git" ]; then
+                error "This checkout is a Git work tree, but git is not installed."
+                error "Install git and run ./run.sh again."
+                exit 1
+            fi
+            warn "git is not installed. Nix can still download flake inputs; local Git checks are skipped."
+        elif [ "${had_git}" -eq 0 ]; then
+            info "git: $(git --version 2>/dev/null | head -1)"
+        fi
+    fi
+    ensure_xz || exit 1
+}
+
+# The Nix installer refuses to unpack its .tar.xz unless `xz` is on PATH.
+# tar -xJf is what actually extracts; this command only has to exist and
+# decompress stdin when tar shells out to it.
+install_python_xz() {
+    command -v python3 >/dev/null 2>&1 || return 1
+    python3 -c 'import lzma' >/dev/null 2>&1 || return 1
+    mkdir -p "${BOOTSTRAP_BIN}"
+    cat > "${BOOTSTRAP_BIN}/xz" <<'EOF'
+#!/bin/sh
+exec python3 -c 'import lzma, sys
+args = [a for a in sys.argv[1:] if a and not a.startswith("-")]
+data = open(args[-1], "rb").read() if args else sys.stdin.buffer.read()
+sys.stdout.buffer.write(lzma.decompress(data))
+'
+EOF
+    chmod 755 "${BOOTSTRAP_BIN}/xz"
+    prepend_bootstrap_path
+}
+
+ensure_xz() {
+    if command -v xz >/dev/null 2>&1; then
         return 0
     fi
-    if [ "${had_git}" -eq 0 ]; then
-        info "git: $(git --version 2>/dev/null | head -1)"
+    host_ensure_commands xz \
+        || warn "Could not install xz with the system package manager."
+    if command -v xz >/dev/null 2>&1; then
+        info "xz: $(xz --version 2>/dev/null | head -1)"
+        return 0
     fi
+    step "xz not found — using Python's lzma so the Nix installer can unpack."
+    if ! install_python_xz; then
+        error "The Nix installer needs xz to unpack its tarball."
+        error "Install it and re-run. On Debian/Ubuntu: sudo apt-get install -y xz-utils"
+        return 1
+    fi
+    info "xz: python lzma helper at ${BOOTSTRAP_BIN}/xz"
 }
 
 nix_present() {
@@ -650,6 +686,7 @@ nix_install_pinned() {
         return 1
     fi
     ensure_curl
+    ensure_xz || return 1
     if [ "${NIX_REPLACE:-}" = "1" ]; then
         nix_remove_previous || return 1
     elif ! nix_present && { [ -e /nix ] || [ -e "${HOME}/.nix-profile" ]; }; then
