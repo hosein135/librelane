@@ -281,11 +281,24 @@ live_sync_once() {
 }
 
 start_live_watcher() {
-    local dest="$1"
-    step "Live change detector on (every ${SYNC_INTERVAL}s) — edits in source sync to workdir"
+    local dest="$1" run_pid="$2"
+    step "Live change detector waits until Nix is installed, then checks every ${SYNC_INTERVAL}s"
     (
         # Isolate from parent set -e so one failed sync does not kill the loop.
+        # Copying /mnt/c on top of the Nix installer can exhaust WSL and crash it.
         set +e
+        while true; do
+            if [ -x /nix/var/nix/profiles/default/bin/nix ] \
+                || [ -x "${HOME}/.nix-profile/bin/nix" ] \
+                || [ -f "${dest}/.librelane-nix-ready" ]; then
+                break
+            fi
+            if ! kill -0 "${run_pid}" 2>/dev/null; then
+                exit 0
+            fi
+            sleep 2
+        done
+        info "Live change detector on (every ${SYNC_INTERVAL}s) — edits in source sync to workdir"
         while true; do
             sleep "${SYNC_INTERVAL}"
             live_sync_once "${dest}"
@@ -393,12 +406,6 @@ host_check_free_space false "${WORK_DIR}" || exit 1
 
 sync_repo_to "${WORK_DIR}"
 
-if [ "${ENABLE_WATCH}" = true ]; then
-    start_live_watcher "${WORK_DIR}"
-else
-    info "Live change detector disabled (--no-watch)"
-fi
-
 step "Starting ./run.sh in work copy ..."
 # A script has no job control, so `&` would point the child's stdin at
 # /dev/null. sudo then prints a password prompt and fails with
@@ -415,6 +422,12 @@ else
     ) &
 fi
 CHILD_PID=$!
+
+if [ "${ENABLE_WATCH}" = true ]; then
+    start_live_watcher "${WORK_DIR}" "${CHILD_PID}"
+else
+    info "Live change detector disabled (--no-watch)"
+fi
 
 # Mirror run.sh: wait survives early return from Ctrl+C handler.
 exit_code=0

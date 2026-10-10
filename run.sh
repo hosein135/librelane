@@ -364,8 +364,16 @@ install_python_xz() {
 #!/bin/sh
 exec python3 -c 'import lzma, sys
 args = [a for a in sys.argv[1:] if a and not a.startswith("-")]
-data = open(args[-1], "rb").read() if args else sys.stdin.buffer.read()
-sys.stdout.buffer.write(lzma.decompress(data))
+src = open(args[-1], "rb") if args else sys.stdin.buffer
+dec = lzma.LZMADecompressor()
+while True:
+    chunk = src.read(1024 * 1024)
+    if not chunk:
+        break
+    sys.stdout.buffer.write(dec.decompress(chunk))
+tail = dec.flush()
+if tail:
+    sys.stdout.buffer.write(tail)
 '
 EOF
     chmod 755 "${BOOTSTRAP_BIN}/xz"
@@ -452,11 +460,9 @@ detect_nix_install_mode() {
         return
     fi
     if is_wsl; then
-        if systemd_running && can_install_nix_daemon; then
-            echo "daemon"
-        else
-            echo "no-daemon"
-        fi
+        # The multi-user daemon installer starts systemd units and user
+        # namespaces. On WSL that can kill the distro. Always single-user.
+        echo "no-daemon"
         return
     fi
     if is_linux; then
@@ -487,7 +493,7 @@ explain_nix_install_choice() {
             ;;
         *)
             if is_wsl; then
-                info "Nix install: single-user (--no-daemon) — WSL without systemd (or no sudo)"
+                info "Nix install: single-user (--no-daemon) — WSL does not use the daemon installer"
             elif is_linux; then
                 info "Nix install: single-user (--no-daemon) — no systemd or no sudo for multi-user"
             else
@@ -512,6 +518,20 @@ nix_install_flags() {
 run_with_pty() {
     # Nix's installer (and nix-env) call tcgetattr; without a TTY they abort:
     # "Inappropriate ioctl for device" / Assertion 'pid != -1'.
+    # A synthetic PTY (python pty, script) can crash WSL during that ioctl.
+    if is_wsl; then
+        if [ -t 0 ] && [ -t 1 ]; then
+            "$@"
+            return $?
+        fi
+        if [ -r /dev/tty ] && [ -w /dev/tty ]; then
+            "$@" < /dev/tty > /dev/tty 2>&1
+            return $?
+        fi
+        error "Nix install on WSL needs an interactive terminal."
+        error "Run ./dev_run.sh from a WSL shell, not a background job."
+        return 1
+    fi
     if [ -t 0 ] && [ -t 1 ]; then
         "$@"
         return $?
@@ -720,6 +740,11 @@ nix_install_pinned() {
     fi
     # shellcheck disable=SC2086
     if ! run_with_pty sh "${installer}" ${flags}; then
+        if is_wsl; then
+            error "Nix installer failed. Not running it again on WSL."
+            error "If /nix was left behind and you own it: rm -rf /nix ~/.nix-profile"
+            return 1
+        fi
         if [ "${mode}" = "daemon" ]; then
             warn "Daemon install failed — retrying single-user (--no-daemon)"
             nix_remove_previous || return 1
