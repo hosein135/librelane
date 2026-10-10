@@ -715,11 +715,15 @@ nix_install_pinned() {
     esac
     explain_nix_install_choice "${mode}"
     info "Nix installer flags: ${flags}"
+    if [ "${mode}" != "daemon" ]; then
+        host_ensure_user_nix_dir || return 1
+    fi
     # shellcheck disable=SC2086
     if ! run_with_pty sh "${installer}" ${flags}; then
         if [ "${mode}" = "daemon" ]; then
             warn "Daemon install failed — retrying single-user (--no-daemon)"
             nix_remove_previous || return 1
+            host_ensure_user_nix_dir || return 1
             if ! run_with_pty sh "${installer}" --no-daemon --yes --no-channel-add; then
                 error "Nix installer failed. If /nix was left behind, remove it and re-run."
                 return 1
@@ -727,6 +731,7 @@ nix_install_pinned() {
         else
             warn "Nix installer failed. Removing the previous tree and retrying once."
             nix_remove_previous || return 1
+            host_ensure_user_nix_dir || return 1
             # shellcheck disable=SC2086
             if ! run_with_pty sh "${installer}" ${flags}; then
                 error "Nix installer failed. If /nix was left behind, remove it and re-run."

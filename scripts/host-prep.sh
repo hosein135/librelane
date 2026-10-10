@@ -687,6 +687,34 @@ host_ensure_git_and_curl() {
     host_ensure_commands git curl
 }
 
+# Single-user Nix needs /nix owned by this user. The upstream installer
+# calls sudo with no password on stdin when it is started from a script,
+# then exits. Create the directory here, where sudo can prompt.
+host_ensure_user_nix_dir() {
+    local user
+    if host_is_nixos; then
+        return 0
+    fi
+    if [ -d /nix ] && [ -w /nix ] && [ -O /nix ]; then
+        return 0
+    fi
+    if [ -e /nix ]; then
+        return 0
+    fi
+    user="$(id -un 2>/dev/null || printf '%s' "${USER:-}")"
+    if [ "$(id -u)" -eq 0 ]; then
+        mkdir -m 0755 /nix || return 1
+        return 0
+    fi
+    if ! command -v sudo >/dev/null 2>&1; then
+        error "Single-user Nix needs /nix owned by ${user}."
+        error "As root run: mkdir -m 0755 /nix && chown ${user} /nix"
+        return 1
+    fi
+    info "Creating /nix owned by ${user}. This asks for your sudo password."
+    sudo sh -c "mkdir -m 0755 /nix && chown $(printf '%q' "${user}") /nix"
+}
+
 # curl, else wget, else python3. Used for the Nix installer and static curl.
 host_http_get() {
     local url="$1" dest="$2" dir

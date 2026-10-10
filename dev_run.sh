@@ -400,10 +400,20 @@ else
 fi
 
 step "Starting ./run.sh in work copy ..."
-(
-    cd "${WORK_DIR}"
-    exec bash ./run.sh "${RUN_ARGS[@]+"${RUN_ARGS[@]}"}"
-) &
+# A script has no job control, so `&` would point the child's stdin at
+# /dev/null. sudo then prints a password prompt and fails with
+# "no password was provided". Keep the terminal attached.
+if [ -r /dev/tty ]; then
+    (
+        cd "${WORK_DIR}"
+        exec bash ./run.sh "${RUN_ARGS[@]+"${RUN_ARGS[@]}"}"
+    ) < /dev/tty &
+else
+    (
+        cd "${WORK_DIR}"
+        exec bash ./run.sh "${RUN_ARGS[@]+"${RUN_ARGS[@]}"}"
+    ) &
+fi
 CHILD_PID=$!
 
 # Mirror run.sh: wait survives early return from Ctrl+C handler.
